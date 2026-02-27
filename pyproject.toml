@@ -39,9 +39,9 @@ dependencies = [
 ]
 
 [project.urls]
-Repository = "https://example.com/armavita-meta-ads-mcp"
-Issues = "https://example.com/armavita-meta-ads-mcp/issues"
-Documentation = "https://example.com/armavita-meta-ads-mcp/docs"
+Repository = "https://github.com/EfrainTorres/armavita-meta-ads-mcp"
+Issues = "https://github.com/EfrainTorres/armavita-meta-ads-mcp/issues"
+Documentation = "https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/main/docs"
 
 [project.scripts]
 armavita-meta-ads-mcp = "armavita_meta_ads_mcp:entrypoint"

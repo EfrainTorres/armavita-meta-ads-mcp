@@ -48,6 +48,46 @@ Login flow:
 armavita-meta-ads-mcp --login
 ```
 
+## Quick MCP Client Config
+
+Minimal MCP server registration (JSON format used by many clients):
+
+```json
+{
+  "mcpServers": {
+    "meta-ads-armavita": {
+      "command": "armavita-meta-ads-mcp",
+      "env": {
+        "META_ACCESS_TOKEN": "EA...",
+        "META_GRAPH_API_VERSION": "v25.0"
+      }
+    }
+  }
+}
+```
+
+OAuth mode (no direct token in config):
+
+```json
+{
+  "mcpServers": {
+    "meta-ads-armavita": {
+      "command": "armavita-meta-ads-mcp",
+      "env": {
+        "META_APP_ID": "YOUR_APP_ID",
+        "META_APP_SECRET": "YOUR_APP_SECRET"
+      }
+    }
+  }
+}
+```
+
+Then run once to complete login:
+
+```bash
+armavita-meta-ads-mcp --login
+```
+
 ## Tool Coverage
 
 - Accounts: `list_ad_accounts`, `read_ad_account`

@@ -60,3 +60,20 @@ Cached token file is stored per OS:
 
 - verify app secret, redirect URI, and permission approval status
 
+`Invalid OAuth access token` / Meta error `code: 190`:
+
+- token expired, revoked, or app secret changed
+- if using direct token, generate a fresh token and restart the MCP server
+- if using OAuth cache, rerun `armavita-meta-ads-mcp --login` to refresh the cached token
+
+`Insufficient permission` / Meta error `code: 200` or `code: 10`:
+
+- the token lacks required Meta Ads permissions/scopes
+- confirm the app and user have approved the needed Ads scopes in Meta App Dashboard
+- re-authenticate after updating scopes to issue a token with the new grants
+
+`No ad account access` or empty account list:
+
+- the authenticated user/token can be valid but not have access to the target ad account
+- verify ad account assignment in Meta Business Manager and user role permissions
+- check that you are querying the correct account ID format (`act_<ID>`)
