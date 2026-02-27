@@ -5,6 +5,7 @@
 </p>
 
 <p align="center"><strong>Brought to you by <a href="https://armavita.com">ArmaVita.com</a></strong></p>
+<p align="center">Need a custom implementation? <a href="https://armavita.com">Contact us</a>.</p>
 
 `armavita-meta-ads-mcp` is a local Model Context Protocol server for Meta Ads.
 It is built for local MCP clients (Claude Code, Cursor, Codex) and supports:
