@@ -1,0 +1,27 @@
+# Python artifacts
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+*.pyc
+
+# Test/cache artifacts
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+.DS_Store
+
+# Local environment and machine-specific files
+.env
+.env.*
+.cursor/

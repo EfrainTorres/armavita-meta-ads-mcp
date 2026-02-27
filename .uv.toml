@@ -1,0 +1,4 @@
+[uv]
+# Keep interpreter resolution explicit for reproducible local runs.
+# First choice tracks the currently validated version in this repo.
+python-path = ["python3.10", "python3.11", "python3"]

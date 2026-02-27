@@ -1,0 +1,58 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "armavita-meta-ads-mcp"
+version = "1.0.0"
+description = "Local-first MCP server for Meta Ads automation and reporting workflows."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+authors = [{ name = "Armavita Maintainers" }]
+keywords = [
+    "ads",
+    "api",
+    "armavita",
+    "facebook",
+    "mcp",
+    "meta",
+]
+classifiers = [
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
+dependencies = [
+    "mcp[cli]==1.12.2",
+    "httpx>=0.26.0",
+    "Pillow>=10.0.0",
+    "python-dateutil>=2.8.2",
+    "python-dotenv>=1.1.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest>=8.4.1",
+    "requests>=2.32.3",
+]
+
+[project.urls]
+Repository = "https://example.com/armavita-meta-ads-mcp"
+Issues = "https://example.com/armavita-meta-ads-mcp/issues"
+Documentation = "https://example.com/armavita-meta-ads-mcp/docs"
+
+[project.scripts]
+armavita-meta-ads-mcp = "armavita_meta_ads_mcp:entrypoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/armavita_meta_ads_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-v --strict-markers -m 'not e2e'"
+markers = [
+    "e2e: end-to-end tests requiring a live MCP process and real credentials",
+]
