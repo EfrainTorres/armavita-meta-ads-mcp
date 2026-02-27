@@ -1,5 +1,11 @@
 # armavita-meta-ads-mcp
 
+<p align="center">
+  <img src="docs/assets/armavita-meta-ads-mcp-hero-1080.jpg" alt="ArmaVita Meta Ads MCP hero image" width="100%" />
+</p>
+
+<p align="center"><strong>Brought to you by <a href="https://armavita.com">ArmaVita.com</a></strong></p>
+
 `armavita-meta-ads-mcp` is a local Model Context Protocol server for Meta Ads.
 It is built for local MCP clients (Claude Code, Cursor, Codex) and supports:
 
