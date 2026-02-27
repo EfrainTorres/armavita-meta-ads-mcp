@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, List, Optional, Union
 
 from .graph_client import make_api_request, meta_api_tool
+from .insight_query_params import normalize_breakdown_inputs, normalize_time_input
 from .mcp_runtime import mcp_server
 
 _DEFAULT_FIELDS = (
@@ -73,6 +74,17 @@ def _with_warning(payload: Dict[str, Any], deprecated: List[str]) -> Dict[str, A
     return payload
 
 
+def _append_warnings(payload: Dict[str, Any], warnings: List[Dict[str, Any]]) -> Dict[str, Any]:
+    if not warnings:
+        return payload
+    existing = payload.get("warnings")
+    if isinstance(existing, list):
+        existing.extend(warnings)
+    else:
+        payload["warnings"] = list(warnings)
+    return payload
+
+
 @mcp_server.tool()
 @meta_api_tool
 async def list_insights(
@@ -80,6 +92,9 @@ async def list_insights(
     meta_access_token: Optional[str] = None,
     date_range: Union[str, Dict[str, str]] = "maximum",
     breakdown: str = "",
+    breakdowns: Optional[List[str]] = None,
+    action_breakdowns: Optional[List[str]] = None,
+    summary_action_breakdowns: Optional[List[str]] = None,
     level: str = "ad",
     page_size: int = 25,
     page_cursor: str = "",
@@ -96,25 +111,19 @@ async def list_insights(
         "page_size": int(page_size),
     }
 
-    if isinstance(date_range, dict):
-        if not (date_range.get("since") and date_range.get("until")):
-            return json.dumps(
-                {
-                    "error": "Custom date_range must contain both 'since' and 'until' keys in YYYY-MM-DD format"
-                },
-                indent=2,
-            )
-        params["date_range"] = json.dumps(
-            {
-                "since": date_range["since"],
-                "until": date_range["until"],
-            }
-        )
-    else:
-        params["date_preset"] = str(date_range)
+    time_params, time_error, normalization_warnings = normalize_time_input(date_range, default_preset="maximum")
+    if time_error:
+        return json.dumps(time_error, indent=2)
+    params.update(time_params or {})
 
-    if breakdown:
-        params["breakdowns"] = breakdown
+    breakdown_params, breakdown_warnings = normalize_breakdown_inputs(
+        breakdown=breakdown,
+        breakdowns=breakdowns,
+        action_breakdowns=action_breakdowns,
+        summary_action_breakdowns=summary_action_breakdowns,
+    )
+    params.update(breakdown_params)
+    normalization_warnings.extend(breakdown_warnings)
 
     if page_cursor:
         params["page_cursor"] = page_cursor
@@ -126,6 +135,7 @@ async def list_insights(
     payload = await make_api_request(f"{object_id}/insights", meta_access_token, params)
 
     if isinstance(payload, dict):
+        _append_warnings(payload, normalization_warnings)
         _with_warning(payload, deprecated_windows)
 
         if compact and isinstance(payload.get("data"), list):

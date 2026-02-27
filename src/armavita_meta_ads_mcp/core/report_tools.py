@@ -3,9 +3,10 @@
 import base64
 import datetime
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from .graph_client import make_api_request, meta_api_tool
+from .insight_query_params import normalize_breakdown_inputs, normalize_time_input
 from .mcp_runtime import mcp_server
 
 _DEFAULT_INSIGHTS_FIELDS = (
@@ -28,18 +29,8 @@ def _to_int(value: Any) -> int:
         return 0
 
 
-def _resolve_time_params(date_range: Any) -> Dict[str, Any]:
-    if isinstance(date_range, dict):
-        since = date_range.get("since")
-        until = date_range.get("until")
-        if since and until:
-            return {"date_range": {"since": since, "until": until}}
-        return {}
-
-    if isinstance(date_range, str) and date_range.strip():
-        return {"date_preset": date_range.strip()}
-
-    return {"date_preset": "last_30d"}
+def _resolve_time_params(date_range: Any):
+    return normalize_time_input(date_range, default_preset="last_30d")
 
 
 def _get_previous_period_from_range(date_range: Dict[str, str]) -> Optional[Dict[str, str]]:
@@ -197,8 +188,8 @@ def _build_simple_pdf_bytes(title: str, lines: List[str]) -> bytes:
 async def _fetch_insights_rows(
     object_id: str,
     meta_access_token: str,
-    date_range: Any,
-    breakdowns: Optional[List[str]],
+    time_params: Dict[str, Any],
+    breakdown_params: Dict[str, str],
     level: str,
 ) -> List[Dict[str, Any]]:
     params: Dict[str, Any] = {
@@ -206,10 +197,8 @@ async def _fetch_insights_rows(
         "level": level,
         "page_size": 200,
     }
-    params.update(_resolve_time_params(date_range))
-
-    if breakdowns:
-        params["breakdowns"] = ",".join([str(b).strip() for b in breakdowns if str(b).strip()])
+    params.update(time_params)
+    params.update(breakdown_params)
 
     data = await make_api_request(f"{object_id}/insights", meta_access_token, params)
     if isinstance(data, dict) and isinstance(data.get("data"), list):
@@ -231,13 +220,15 @@ async def create_report(
     ad_account_id: str,
     meta_access_token: Optional[str] = None,
     report_type: str = "account",
-    date_range: str = "last_30d",
+    date_range: Union[str, Dict[str, str]] = "last_30d",
     campaign_ids: Optional[List[str]] = None,
     export_format: str = "pdf",
     report_name: Optional[str] = None,
     include_sections: Optional[List[str]] = None,
     breakdowns: Optional[List[str]] = None,
-    comparison_period: Optional[str] = None,
+    action_breakdowns: Optional[List[str]] = None,
+    summary_action_breakdowns: Optional[List[str]] = None,
+    comparison_period: Optional[Union[str, Dict[str, str]]] = None,
 ) -> str:
     """Generate OSS-local performance reports for Meta Ads accounts/campaigns."""
     if not ad_account_id:
@@ -283,18 +274,80 @@ async def create_report(
         "generated_at": generated_at,
         "date_range": date_range,
         "breakdowns": breakdowns or [],
+        "action_breakdowns": action_breakdowns or [],
+        "summary_action_breakdowns": summary_action_breakdowns or [],
         "sections": {},
     }
+
+    base_time_params, time_error, time_warnings = _resolve_time_params(date_range)
+    if time_error:
+        return {
+            "error": "invalid_parameters",
+            "message": time_error.get("message", "Invalid date range"),
+            "details": time_error,
+        }
+    if not base_time_params:
+        return {
+            "error": "invalid_parameters",
+            "message": "Invalid date range",
+            "details": {"error": "invalid_date_range"},
+        }
+
+    breakdown_params, breakdown_warnings = normalize_breakdown_inputs(
+        breakdowns=breakdowns,
+        action_breakdowns=action_breakdowns,
+        summary_action_breakdowns=summary_action_breakdowns,
+    )
+
+    warnings: List[Dict[str, Any]] = []
+    warnings.extend(time_warnings)
+    warnings.extend(breakdown_warnings)
+    comparison_time_params: Optional[Dict[str, Any]] = None
+    comparison_window: Optional[Union[str, Dict[str, str]]] = None
+    if normalized_type == "comparison":
+        comparison_window = comparison_period if comparison_period is not None else _default_comparison_period(date_range)
+        comparison_time_params, comparison_error, comparison_warnings = _resolve_time_params(comparison_window)
+        if comparison_error:
+            return {
+                "error": "invalid_parameters",
+                "message": comparison_error.get("message", "Invalid comparison period"),
+                "details": {
+                    "parameter": "comparison_period",
+                    **comparison_error,
+                },
+            }
+        if not comparison_time_params:
+            return {
+                "error": "invalid_parameters",
+                "message": "Invalid comparison period",
+                "details": {"parameter": "comparison_period", "error": "invalid_date_range"},
+            }
+        warnings.extend(comparison_warnings)
+
+    if warnings:
+        report["warnings"] = warnings
 
     rows: List[Dict[str, Any]] = []
     per_campaign_rows: Dict[str, List[Dict[str, Any]]] = {}
 
     if normalized_type == "account":
-        rows = await _fetch_insights_rows(ad_account_id, meta_access_token, date_range, breakdowns, "account")
+        rows = await _fetch_insights_rows(
+            ad_account_id,
+            meta_access_token,
+            base_time_params,
+            breakdown_params,
+            "account",
+        )
 
     if normalized_type in {"campaign", "comparison"} and campaign_ids:
         for campaign_id in campaign_ids:
-            campaign_rows = await _fetch_insights_rows(campaign_id, meta_access_token, date_range, breakdowns, "campaign")
+            campaign_rows = await _fetch_insights_rows(
+                campaign_id,
+                meta_access_token,
+                base_time_params,
+                breakdown_params,
+                "campaign",
+            )
             per_campaign_rows[campaign_id] = campaign_rows
             rows.extend(campaign_rows)
 
@@ -315,14 +368,13 @@ async def create_report(
         report["sections"]["campaigns"] = campaign_summaries
 
     if normalized_type == "comparison":
-        comparison_window = comparison_period if comparison_period is not None else _default_comparison_period(date_range)
         comparison_rows: List[Dict[str, Any]] = []
         for campaign_id in campaign_ids or []:
             campaign_rows = await _fetch_insights_rows(
                 campaign_id,
                 meta_access_token,
-                comparison_window,
-                breakdowns,
+                comparison_time_params or {},
+                breakdown_params,
                 "campaign",
             )
             comparison_rows.extend(campaign_rows)

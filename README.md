@@ -64,6 +64,15 @@ Cursor-based pagination is supported on core list/read streams:
 - Use `page_cursor` with the `paging.cursors.after` value from the previous response.
 - Responses preserve Meta's native `paging` object.
 
+## Insights Query Notes
+
+- `list_insights` and `create_report` support either:
+  - `date_range` as `{ "since": "YYYY-MM-DD", "until": "YYYY-MM-DD" }`, or
+  - `date_range` as a preset (for example `last_30d`, `maximum`).
+- `create_report.comparison_period` uses the same format and validation as `date_range`.
+- `previous_30d` is normalized to `last_30d`.
+- For action metrics, use `action_breakdowns` (and optional `summary_action_breakdowns`) instead of mixing action keys into `breakdowns`.
+
 ## Security
 
 - Access tokens are redacted from URL fields returned by the server (including nested `paging.next` URLs).

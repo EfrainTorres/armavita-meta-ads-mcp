@@ -202,6 +202,8 @@ def test_v1_signature_snapshot():
             "report_name",
             "include_sections",
             "breakdowns",
+            "action_breakdowns",
+            "summary_action_breakdowns",
             "comparison_period",
         ],
         "estimate_audience_size": [
@@ -232,6 +234,9 @@ def test_v1_signature_snapshot():
             "meta_access_token",
             "date_range",
             "breakdown",
+            "breakdowns",
+            "action_breakdowns",
+            "summary_action_breakdowns",
             "level",
             "page_size",
             "page_cursor",
