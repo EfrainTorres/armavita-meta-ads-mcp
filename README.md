@@ -13,9 +13,11 @@ It is built for local MCP clients (Claude Code, Cursor, Codex) and supports:
 - Meta access token auth (`META_ACCESS_TOKEN`)
 - Local OAuth flow (`META_APP_ID` + `META_APP_SECRET`)
 - stdio MCP transport only
+- Python `3.11+`
+- `mcp[cli]==1.26.0`
 - Meta Marketing API `v25.0` by default (`META_GRAPH_API_VERSION` override supported)
 
-Current contract version: `1.0.0`.
+Current contract version: `1.1.0`.
 
 ## Install
 

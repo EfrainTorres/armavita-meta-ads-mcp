@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 from pathlib import Path
 import sys
 from unittest.mock import patch

@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared constants for Meta Ads MCP runtime configuration."""
 
 import os

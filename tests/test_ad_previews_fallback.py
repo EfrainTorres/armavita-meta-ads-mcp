@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 import json
 import sys
 from pathlib import Path
@@ -53,4 +56,3 @@ async def test_list_ad_previews_respects_explicit_ad_format_without_retry():
     assert mock_api.await_count == 1
     call_params = mock_api.call_args.args[2]
     assert call_params["ad_format"] == "MOBILE_FEED_STANDARD"
-

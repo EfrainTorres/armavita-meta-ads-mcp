@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Normalization helpers for Meta insights query parameters."""
 
 from __future__ import annotations

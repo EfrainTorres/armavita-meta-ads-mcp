@@ -4,10 +4,10 @@ build-backend = "hatchling.build"
 
 [project]
 name = "armavita-meta-ads-mcp"
-version = "1.0.0"
+version = "1.1.0"
 description = "Local-first MCP server for Meta Ads automation and reporting workflows."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = "AGPL-3.0-only"
 license-files = ["LICENSE"]
 authors = [{ name = "Armavita Maintainers" }]
@@ -23,19 +23,24 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: GNU Affero General Public License v3",
 ]
 dependencies = [
-    "mcp[cli]==1.12.2",
+    "mcp[cli]==1.26.0",
     "httpx>=0.26.0",
     "Pillow>=10.0.0",
     "python-dateutil>=2.8.2",
     "python-dotenv>=1.1.0",
-    "pytest-asyncio>=1.0.0",
-    "pytest>=8.4.1",
     "requests>=2.32.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4.1",
+    "pytest-asyncio>=1.0.0",
 ]
 
 [project.urls]

@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Shared utility helpers used across MCP tools."""
 
 import logging

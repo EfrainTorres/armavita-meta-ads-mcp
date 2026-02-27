@@ -21,6 +21,9 @@ htmlcov/
 venv/
 .DS_Store
 
+# Logs
+*.log
+
 # Local environment and machine-specific files
 .env
 .env.*

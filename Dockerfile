@@ -18,7 +18,7 @@ COPY requirements.txt ./requirements.txt
 RUN uv pip install --system --requirement requirements.txt
 
 COPY src ./src
-COPY README.md pyproject.toml setup.py ./
+COPY README.md pyproject.toml ./
 COPY scripts ./scripts
 
 ENV PYTHONPATH=/opt/armavita/src

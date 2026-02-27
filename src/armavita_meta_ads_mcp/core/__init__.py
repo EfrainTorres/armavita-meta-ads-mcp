@@ -1,3 +1,6 @@
+# Copyright (C) 2025 ArmaVita LLC
+# SPDX-License-Identifier: AGPL-3.0-only
+
 """Public exports for armavita-meta-ads-mcp core modules."""
 
 from .account_tools import read_ad_account, list_ad_accounts
