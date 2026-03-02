@@ -1,4 +1,4 @@
-# Meta, Instagram, Facebook MCP
+# Meta, Instagram, Facebook Ads MCP
 
 <p align="center">
   <img src="docs/assets/armavita-meta-ads-mcp-hero-1080.jpg" alt="ArmaVita Meta Ads MCP hero image" width="100%" />
