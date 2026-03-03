@@ -22,7 +22,7 @@ class McpToolError(Exception):
     """Base error type surfaced as MCP tool errors."""
 
 
-USER_AGENT = "armavita-meta-ads-mcp/1.0"
+USER_AGENT = "armavita-meta-ads-mcp/1.1.0"
 
 def _log_rate_headers(headers: dict, endpoint: str) -> None:
     usage_headers = {
