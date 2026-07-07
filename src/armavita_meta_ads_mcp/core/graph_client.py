@@ -4,6 +4,7 @@
 """Shared Graph API client and MCP tool decorator helpers."""
 
 
+import asyncio
 import functools
 import json
 import os
@@ -15,14 +16,11 @@ import httpx
 from . import auth_state as auth
 from .auth_state import auth_manager
 from .graph_constants import META_GRAPH_API_BASE, META_GRAPH_API_VERSION
-from .media_helpers import logger
+from .media_helpers import USER_AGENT, logger
 
 
 class McpToolError(Exception):
     """Base error type surfaced as MCP tool errors."""
-
-
-USER_AGENT = "armavita-meta-ads-mcp/1.1.0"
 
 def _log_rate_headers(headers: dict, endpoint: str) -> None:
     usage_headers = {
@@ -36,7 +34,43 @@ def _log_rate_headers(headers: dict, endpoint: str) -> None:
 
 
 
+# Transient-failure retry policy for Graph requests.
+_MAX_RETRY_ATTEMPTS = 3
+# Meta rate-limit error codes (app / user / page / custom). The request was rejected
+# without being applied, so these are safe to retry for ANY method.
+_RETRYABLE_GRAPH_CODES = frozenset({4, 17, 32, 613})
+# Server-side errors and network failures are AMBIGUOUS for writes (the request may
+# have been applied), so they are retried only for idempotent methods to avoid
+# duplicate side effects (e.g. double-creating a campaign/ad).
+_SERVER_ERROR_STATUS = frozenset({500, 502, 503, 504})
+_IDEMPOTENT_METHODS = frozenset({"GET", "DELETE"})
+
+
+def _backoff_seconds(attempt: int) -> float:
+    """Exponential backoff: 1s, 2s, 4s … capped at 8s."""
+    return min(8.0, 1.0 * (2 ** attempt))
+
+
+def _retry_after_seconds(response: "httpx.Response") -> Optional[float]:
+    raw = response.headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        return min(30.0, float(raw))
+    except (TypeError, ValueError):
+        return None
+
+
 def _remap_graph_keys(value: Any) -> Any:
+    """Translate the MCP's ergonomic parameter names to Graph API field names.
+
+    Applied recursively so the alias map also covers nested specs the tools build
+    (e.g. creative={"ad_creative_id": ...} -> creative={"creative_id": ...}, or
+    link_data primary_text -> message). The alias *source* names are this MCP's own
+    parameter names, so translating them at any depth is intended. NOTE: this means
+    a caller-supplied nested dict that reuses one of these source names as a literal
+    key will also be translated; pass already-JSON-encoded strings to opt out.
+    """
     key_aliases = {
         "meta_access_token": "access_token",
         "page_size": "limit",
@@ -111,14 +145,19 @@ async def make_api_request(
     meta_access_token: str,
     params: Optional[Dict[str, Any]] = None,
     method: str = "GET",
+    files: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Execute a Meta Graph API request and return normalized JSON payload."""
+    """Execute a Meta Graph API request and return normalized JSON payload.
+
+    Transient failures (HTTP 429/5xx and Meta rate-limit error codes 4/17/32/613)
+    are retried with exponential backoff, honoring a `Retry-After` header when present.
+    """
     if not meta_access_token:
         return {
             "error": {
-                "message": "Authentication Required",
-                "details": "A valid access token is required to access the Meta API",
-                "action_required": "Please authenticate first",
+                "message": "Not authenticated",
+                "details": "This tool cannot call the Meta API without a valid access token",
+                "action_required": "Run the login flow (or set META_ACCESS_TOKEN) and retry",
             }
         }
 
@@ -129,67 +168,110 @@ async def make_api_request(
     logger.debug("Graph request method=%s url=%s params=%s", method, url, safe_params)
 
     async with httpx.AsyncClient(timeout=30.0) as client:
-        try:
-            if method == "GET":
-                response = await client.get(url, params=request_params, headers={"User-Agent": USER_AGENT})
-            elif method == "POST":
-                response = await client.post(url, data=request_params, headers={"User-Agent": USER_AGENT})
-            elif method == "DELETE":
-                response = await client.delete(url, params=request_params, headers={"User-Agent": USER_AGENT})
-            else:
-                return {"error": {"message": f"Unsupported HTTP method: {method}"}}
-
-            _log_rate_headers(response.headers, endpoint)
-            response.raise_for_status()
+        for attempt in range(_MAX_RETRY_ATTEMPTS + 1):
             try:
-                return _sanitize_response_payload(response.json())
-            except json.JSONDecodeError:
-                return {"text_response": response.text, "status_code": response.status_code}
+                if method == "GET":
+                    response = await client.get(url, params=request_params, headers={"User-Agent": USER_AGENT})
+                elif method == "POST":
+                    if files:
+                        response = await client.post(
+                            url,
+                            data=request_params,
+                            files=files,
+                            headers={"User-Agent": USER_AGENT},
+                        )
+                    else:
+                        response = await client.post(url, data=request_params, headers={"User-Agent": USER_AGENT})
+                elif method == "DELETE":
+                    response = await client.delete(url, params=request_params, headers={"User-Agent": USER_AGENT})
+                else:
+                    return {"error": {"message": f"Unsupported HTTP method: {method}"}}
 
-        except httpx.HTTPStatusError as exc:
-            _log_rate_headers(exc.response.headers, endpoint)
-            try:
-                error_payload = exc.response.json()
-            except Exception:  # noqa: BLE001
-                error_payload = {
-                    "status_code": exc.response.status_code,
-                    "text": exc.response.text,
-                }
-            error_payload = _sanitize_response_payload(error_payload)
+                _log_rate_headers(response.headers, endpoint)
+                response.raise_for_status()
+                try:
+                    return _sanitize_response_payload(response.json())
+                except json.JSONDecodeError:
+                    return {"text_response": response.text, "status_code": response.status_code}
 
-            error_obj = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
-            code = error_obj.get("code") if isinstance(error_obj, dict) else None
-            if code in {190, 102, 10}:
-                auth_manager.invalidate_token()
+            except httpx.HTTPStatusError as exc:
+                _log_rate_headers(exc.response.headers, endpoint)
+                try:
+                    error_payload = exc.response.json()
+                except Exception:  # noqa: BLE001
+                    error_payload = {
+                        "status_code": exc.response.status_code,
+                        "text": exc.response.text,
+                    }
+                error_payload = _sanitize_response_payload(error_payload)
 
-            error_message = error_obj.get("message") or error_obj.get("primary_text", "")
-            if code == 200 and isinstance(error_obj, dict) and "Provide valid app ID" in error_message:
+                error_obj = error_payload.get("error", {}) if isinstance(error_payload, dict) else {}
+                code = error_obj.get("code") if isinstance(error_obj, dict) else None
+                status = exc.response.status_code
+
+                # Rate-limit (429 / Meta codes) -> safe to retry for any method.
+                # Server 5xx -> retry only idempotent methods (avoid duplicate writes).
+                is_rate_limited = status == 429 or code in _RETRYABLE_GRAPH_CODES
+                is_retryable_server = status in _SERVER_ERROR_STATUS and method in _IDEMPOTENT_METHODS
+                if (is_rate_limited or is_retryable_server) and attempt < _MAX_RETRY_ATTEMPTS:
+                    delay = _retry_after_seconds(exc.response) or _backoff_seconds(attempt)
+                    logger.warning(
+                        "meta_retry endpoint=%s status=%s code=%s attempt=%s delay=%.1fs",
+                        endpoint, status, code, attempt + 1, delay,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                if code in {190, 102, 10}:
+                    auth_manager.invalidate_token()
+
+                error_message = error_obj.get("message") or error_obj.get("primary_text", "")
+                if code == 200 and isinstance(error_obj, dict) and "Provide valid app ID" in error_message:
+                    return {
+                        "error": {
+                            "message": "Your Meta app credentials appear misconfigured - verify META_APP_ID / META_APP_SECRET.",
+                            "original_error": error_message,
+                            "code": code,
+                        }
+                    }
+
                 return {
                     "error": {
-                        "message": "Meta API authentication configuration issue. Please check your app credentials.",
-                        "original_error": error_message,
-                        "code": code,
+                        "message": f"HTTP Error: {status}",
+                        "details": error_payload,
+                        "full_response": {
+                            "status_code": status,
+                            "url": _sanitize_url(str(exc.response.url)),
+                            "request_method": exc.request.method,
+                        },
                     }
                 }
 
-            return {
-                "error": {
-                    "message": f"HTTP Error: {exc.response.status_code}",
-                    "details": error_payload,
-                    "full_response": {
-                        "status_code": exc.response.status_code,
-                        "url": _sanitize_url(str(exc.response.url)),
-                        "request_method": exc.request.method,
-                    },
-                }
-            }
+            except httpx.TransportError as exc:
+                # Network/timeout errors are ambiguous for writes (the request may have
+                # been applied), so only retry idempotent methods; surface otherwise.
+                if method in _IDEMPOTENT_METHODS and attempt < _MAX_RETRY_ATTEMPTS:
+                    delay = _backoff_seconds(attempt)
+                    logger.warning(
+                        "meta_retry_transport endpoint=%s attempt=%s delay=%.1fs error=%s",
+                        endpoint, attempt + 1, delay, type(exc).__name__,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                logger.exception("Graph request failed (transport): %s", exc)
+                message = str(exc)
+                if "access_token=" in message.lower():
+                    message = _sanitize_url(message)
+                return {"error": {"message": message}}
 
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Graph request failed: %s", exc)
-            message = str(exc)
-            if "access_token=" in message.lower():
-                message = _sanitize_url(message)
-            return {"error": {"message": message}}
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("Graph request failed: %s", exc)
+                message = str(exc)
+                if "access_token=" in message.lower():
+                    message = _sanitize_url(message)
+                return {"error": {"message": message}}
+
+    return {"error": {"message": "Max retries exceeded contacting the Meta Graph API"}}
 
 
 
@@ -199,13 +281,13 @@ def _auth_error_payload() -> str:
     return json.dumps(
         {
             "error": {
-                "message": "Authentication Required",
+                "message": "Not authenticated",
                 "details": {
-                    "description": "You need to authenticate with the Meta API before using this tool",
-                    "action_required": "Please authenticate first",
+                    "description": "Authenticate with Meta before calling this tool",
+                    "action_required": "Run the login flow (or set META_ACCESS_TOKEN) and retry",
                     "auth_url": auth_url,
                     "configuration_status": {
-                        "app_id_configured": bool(app_id) and app_id != "YOUR_META_APP_ID",
+                        "app_id_configured": bool(app_id) and app_id != "MISSING_META_APP_ID",
                     },
                     "troubleshooting": "Set META_ACCESS_TOKEN or complete OAuth login with META_APP_ID and META_APP_SECRET.",
                     "markdown_link": f"[Click here to authenticate with Meta Ads API]({auth_url})",
@@ -216,7 +298,7 @@ def _auth_error_payload() -> str:
     )
 
 
-# Generic wrapper for all Meta API tools
+# Shared decorator applied to every Graph-calling tool
 def meta_api_tool(func):
     """Decorator adding auth bootstrap and stable error serialization for MCP tools."""
 

@@ -9,11 +9,12 @@ from typing import Optional
 
 from .graph_client import make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 _ALLOWED_BUDGET_VALUE_TYPES = {"ABSOLUTE", "MULTIPLIER"}
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def create_campaign_budget_schedule(
     campaign_id: str,
@@ -25,9 +26,9 @@ async def create_campaign_budget_schedule(
 ) -> str:
     """Create a high-demand budget schedule for a campaign."""
     if not campaign_id:
-        return json.dumps({"error": "Campaign ID is required"}, indent=2)
+        return json.dumps({"error": "A campaign ID must be provided"}, indent=2)
     if budget_value is None:
-        return json.dumps({"error": "Budget value is required"}, indent=2)
+        return json.dumps({"error": "No budget_value was provided"}, indent=2)
     if time_start is None or time_end is None:
         return json.dumps({"error": "time_start and time_end are required"}, indent=2)
 

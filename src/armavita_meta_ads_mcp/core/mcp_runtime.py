@@ -15,7 +15,7 @@ from .media_helpers import logger
 
 mcp_server = FastMCP("meta-ads")
 
-# Prevent upstream HTTP libraries from logging full request URLs that can
+# Prevent third-party HTTP libraries from logging full request URLs that can
 # include access_token query parameters.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -43,17 +43,28 @@ def _configure_meta_app_id(cli_app_id: Optional[str]) -> None:
 
 def _import_tool_modules() -> None:
     from . import (  # noqa: F401
+        account_controls_tools,
         account_tools,
         ad_tools,
         adset_tools,
         ads_archive_tools,
+        audience_tools,
         budget_schedule_tools,
         campaign_tools,
+        capi_tools,
+        catalog_tools,
+        conversion_tools,
+        derived_metrics_tools,
         duplication_tools,
         insight_tools,
+        insights_async_tools,
+        partnership_tools,
+        reach_frequency_tools,
+        recommendation_tools,
         report_tools,
         research_tools,
         targeting_tools,
+        threads_tools,
     )
 
 

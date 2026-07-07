@@ -12,7 +12,7 @@ from armavita_meta_ads_mcp.core import mcp_runtime
 
 
 def test_package_exports():
-    assert armavita_meta_ads_mcp.__version__ == "1.1.0"
+    assert armavita_meta_ads_mcp.__version__ == "1.2.0"
     assert callable(armavita_meta_ads_mcp.entrypoint)
 
 
@@ -31,4 +31,4 @@ def test_runtime_version_flag(capsys):
 
     captured = capsys.readouterr()
     assert exit_code == 0
-    assert "Armavita Meta Ads MCP v1.1.0" in captured.out
+    assert "Armavita Meta Ads MCP v1.2.0" in captured.out

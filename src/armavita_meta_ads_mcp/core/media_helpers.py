@@ -11,7 +11,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
 
+from .._version import __version__
+
 PACKAGE_NAME = "armavita-meta-ads-mcp"
+USER_AGENT = f"{PACKAGE_NAME}/{__version__}"
 LOGGER_NAME = "armavita_meta_ads_mcp"
 
 META_APP_ID = os.environ.get("META_APP_ID", "")
@@ -22,7 +25,7 @@ def _resolve_log_file() -> pathlib.Path:
     """Return a writable per-user log file path across OSes."""
     system_name = platform.system().lower()
     if system_name == "windows":
-        root = pathlib.Path(os.environ.get("APPDATA", pathlib.Path.home()))
+        root = pathlib.Path(os.environ.get("APPDATA") or pathlib.Path.home())
     elif system_name == "darwin":
         root = pathlib.Path.home() / "Library" / "Application Support"
     else:
@@ -126,7 +129,7 @@ async def download_image(url: str) -> Optional[bytes]:
         return None
 
     headers = {
-        "User-Agent": "armavita-meta-ads-mcp/1.0",
+        "User-Agent": USER_AGENT,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
     }
 
@@ -147,7 +150,7 @@ async def try_multiple_download_methods(url: str) -> Optional[bytes]:
 
     header_profiles = [
         {
-            "User-Agent": "armavita-meta-ads-mcp/1.0",
+            "User-Agent": USER_AGENT,
             "Accept": "image/*,*/*;q=0.8",
         },
         {

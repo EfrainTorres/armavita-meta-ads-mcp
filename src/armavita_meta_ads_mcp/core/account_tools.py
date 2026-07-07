@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional
 
 from .graph_client import make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 _ZERO_DECIMAL_CURRENCIES = {
     "BIF",
@@ -92,7 +93,7 @@ async def _list_accessible_accounts(meta_access_token: str) -> Dict[str, Any]:
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_ad_accounts(
     meta_access_token: Optional[str] = None,
@@ -122,7 +123,7 @@ async def list_ad_accounts(
     return json.dumps(payload, indent=2)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def read_ad_account(ad_account_id: str, meta_access_token: Optional[str] = None) -> str:
     """Return account metadata for a single ad account."""
@@ -131,7 +132,7 @@ async def read_ad_account(ad_account_id: str, meta_access_token: Optional[str] =
         return json.dumps(
             {
                 "error": {
-                    "message": "Account ID is required",
+                    "message": "No ad account ID was provided",
                     "details": "Please specify an ad_account_id parameter",
                     "example": "Use ad_account_id='act_123456789' or ad_account_id='123456789'",
                 }
@@ -162,7 +163,7 @@ async def read_ad_account(ad_account_id: str, meta_access_token: Optional[str] =
                 {
                     "error": {
                         "message": f"Account {normalized_account_id} is not accessible to your user account",
-                        "details": "This account either doesn't exist or you don't have permission to access it",
+                        "details": "The requested ad account was not found, or your token lacks access to it",
                         "accessible_accounts": visible[:10],
                         "total_accessible_accounts": len(visible),
                         "suggestion": "Try using one of the accessible account IDs listed above",

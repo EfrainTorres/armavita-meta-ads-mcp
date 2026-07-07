@@ -28,3 +28,7 @@ venv/
 .env
 .env.*
 .cursor/
+
+# IDE/agent directories
+.idea/
+.claude/

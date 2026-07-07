@@ -4,8 +4,9 @@
 """Local OAuth callback server used by Meta login flow."""
 
 
-import json
+import html
 import os
+import secrets
 import socket
 import threading
 import time
@@ -23,6 +24,13 @@ token_container: dict = {}
 
 
 
+def _state_is_valid(state: Optional[str], expected_state: Optional[str]) -> bool:
+    """Fail-closed CSRF check: require an issued nonce AND a constant-time match."""
+    if not expected_state or not state:
+        return False
+    return secrets.compare_digest(str(state), str(expected_state))
+
+
 def reset_token_container() -> None:
     token_container.clear()
     token_container.update(
@@ -32,6 +40,7 @@ def reset_token_container() -> None:
             "meta_user_id": None,
             "auth_code": None,
             "state": None,
+            "expected_state": None,
             "redirect_uri": None,
             "status": "pending",
             "error": None,
@@ -56,9 +65,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
         if parsed.path == "/callback":
             self._handle_callback(parsed)
             return
-        if parsed.path == "/token":
-            self._json_response({"status": "success", "data": token_container})
-            return
+        # Note: there is deliberately no "/token" route. The access token must
+        # never be served over HTTP — any local process could read it. login()
+        # reads the in-process token_container directly instead.
         self.send_response(404)
         self.end_headers()
 
@@ -66,16 +75,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
         _ = (fmt, args)
         return
 
-    def _json_response(self, payload: dict) -> None:
-        body = json.dumps(payload).encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def _html_response(self, html: str) -> None:
-        body = html.encode("utf-8")
+    def _html_response(self, markup: str) -> None:
+        body = markup.encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -101,7 +102,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             )
             self._html_response(
                 "<html><body><h1>Authorization failed</h1><p>"
-                + primary_text
+                + html.escape(str(primary_text))
                 + "</p></body></html>"
             )
             _shutdown_async()
@@ -117,6 +118,26 @@ class CallbackHandler(BaseHTTPRequestHandler):
             )
             self._html_response(
                 "<html><body><h1>Authorization failed</h1><p>No auth code provided.</p></body></html>"
+            )
+            _shutdown_async()
+            return
+
+        # CSRF defense: the returned `state` must match the nonce issued by the
+        # login flow (issue_login_state). Fail closed — reject before exchanging
+        # the code if no nonce was issued or it does not match.
+        expected_state = token_container.get("expected_state")
+        if not _state_is_valid(state, expected_state):
+            token_container.update(
+                {
+                    "status": "error",
+                    "error": "state_mismatch",
+                    "state": state,
+                    "timestamp": time.time(),
+                }
+            )
+            self._html_response(
+                "<html><body><h1>Authorization failed</h1>"
+                "<p>State verification failed (possible CSRF). Please retry login.</p></body></html>"
             )
             _shutdown_async()
             return
@@ -166,7 +187,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
                 )
                 self._html_response(
                     "<html><body><h1>Authorization failed</h1><p>"
-                    + str(error_code)
+                    + html.escape(str(error_code))
                     + "</p></body></html>"
                 )
         except Exception as exc:  # noqa: BLE001

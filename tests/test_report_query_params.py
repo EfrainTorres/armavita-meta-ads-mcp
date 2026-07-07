@@ -10,7 +10,21 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from armavita_meta_ads_mcp.core.report_tools import create_report
+from armavita_meta_ads_mcp.core.report_tools import _build_simple_pdf_bytes, create_report
+
+
+def test_pdf_stream_uses_real_newlines_not_literal_backslash_n():
+    """Regression: literal `\\n` between Tj operators broke pdftotext (silently dropped lines)."""
+    pdf = _build_simple_pdf_bytes("Title", ["Alpha", "Beta", "Gamma"])
+    start = pdf.index(b"stream\n") + len(b"stream\n")
+    end = pdf.index(b"\nendstream")
+    body = pdf[start:end]
+
+    # No literal backslash-n bytes inside the content stream.
+    assert b"\\n" not in body, "PDF stream contains literal '\\n' instead of real newlines"
+    # All three lines are present in the content stream as PDF text-show strings.
+    for line in (b"(Alpha) Tj", b"(Beta) Tj", b"(Gamma) Tj"):
+        assert line in body, f"missing PDF text show op for {line!r}"
 
 
 @pytest.mark.asyncio

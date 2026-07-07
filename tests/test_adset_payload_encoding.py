@@ -61,6 +61,62 @@ async def test_create_adset_serializes_targeting_and_promoted_object():
 
 
 @pytest.mark.asyncio
+async def test_create_adset_strips_deprecated_video_feeds_placement():
+    with patch("armavita_meta_ads_mcp.core.adset_tools.make_api_request", new_callable=AsyncMock) as mock_api, patch(
+        "armavita_meta_ads_mcp.core.adset_tools._parent_campaign_bid_strategy", new_callable=AsyncMock
+    ) as mock_parent:
+        mock_parent.return_value = None
+        mock_api.return_value = {"success": True, "id": "new_adset"}
+
+        raw = await create_ad_set(
+            ad_account_id="act_1",
+            campaign_id="cmp_1",
+            name="Placement adset",
+            optimization_goal="LINK_CLICKS",
+            billing_event="IMPRESSIONS",
+            meta_access_token="token",
+            targeting={
+                "geo_locations": {"countries": ["US"]},
+                "facebook_positions": ["feed", "video_feeds", "story"],
+            },
+        )
+
+    payload = json.loads(raw)
+    assert payload["success"] is True
+    assert "video_feeds" in payload.get("_warning", "")
+    assert "v24.0" in payload.get("_warning", "")
+
+    sent_targeting = json.loads(mock_api.call_args.args[2]["targeting"])
+    assert "video_feeds" not in sent_targeting["facebook_positions"]
+    assert sent_targeting["facebook_positions"] == ["feed", "story"]
+
+
+@pytest.mark.asyncio
+async def test_update_adset_strips_video_feeds_and_exclusions_together():
+    with patch("armavita_meta_ads_mcp.core.adset_tools.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.return_value = {"success": True, "id": "adset_1"}
+
+        raw = await update_ad_set(
+            ad_set_id="adset_1",
+            meta_access_token="token",
+            targeting={
+                "geo_locations": {"countries": ["US"]},
+                "facebook_positions": ["feed", "video_feeds"],
+                "exclusions": {"interests": [{"id": "123"}]},
+            },
+        )
+
+    payload = json.loads(raw)
+    warning = payload.get("_warning", "")
+    assert "video_feeds" in warning
+    assert "exclusions" in warning
+
+    sent_targeting = json.loads(mock_api.call_args.args[2]["targeting"])
+    assert "exclusions" not in sent_targeting
+    assert sent_targeting["facebook_positions"] == ["feed"]
+
+
+@pytest.mark.asyncio
 async def test_create_adset_rejects_missing_bid_amount_for_bid_cap():
     raw = await create_ad_set(
         ad_account_id="act_1",

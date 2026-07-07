@@ -67,3 +67,51 @@ async def test_create_ad_creative_variant_payload_uses_asset_feed_spec():
     assert feed["bodies"] == [{"text": "Copy A"}, {"text": "Copy B"}]
     assert feed["titles"] == [{"text": "Headline A"}]
     assert feed["descriptions"] == [{"text": "Desc A"}]
+
+
+@pytest.mark.asyncio
+async def test_create_ad_creative_carousel_builds_child_attachments():
+    with patch("armavita_meta_ads_mcp.core.ad_tools.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.side_effect = [{"id": "creative_3"}, {"id": "creative_3", "name": "Carousel"}]
+
+        raw = await create_ad_creative(
+            ad_account_id="act_123",
+            facebook_page_id="123456",
+            link_url="https://example.com",
+            primary_text="Shop now",
+            carousel_cards=[
+                {"link": "https://example.com/1", "name": "Card 1", "image_hash": "hash_1"},
+                {"link": "https://example.com/2", "name": "Card 2", "image_hash": "hash_2"},
+            ],
+            meta_access_token="token",
+        )
+
+    payload = json.loads(raw)
+    assert payload["success"] is True
+
+    params = mock_api.call_args_list[0].args[2]
+    link_data = params["object_story_spec"]["link_data"]
+    assert link_data["ad_formats"] == ["CAROUSEL"]
+    assert len(link_data["child_attachments"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_create_ad_creative_catalog_sets_product_set_id():
+    with patch("armavita_meta_ads_mcp.core.ad_tools.make_api_request", new_callable=AsyncMock) as mock_api:
+        mock_api.side_effect = [{"id": "creative_4"}, {"id": "creative_4", "name": "Catalog"}]
+
+        raw = await create_ad_creative(
+            ad_account_id="act_123",
+            facebook_page_id="123456",
+            link_url="https://example.com",
+            primary_text="Catalog ad",
+            product_set_id="set_99",
+            meta_access_token="token",
+        )
+
+    payload = json.loads(raw)
+    assert payload["success"] is True
+
+    params = mock_api.call_args_list[0].args[2]
+    assert params["product_set_id"] == "set_99"
+    assert "template_data" in params["object_story_spec"]

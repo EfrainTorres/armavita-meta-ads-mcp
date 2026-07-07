@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import pathlib
+import secrets
 import time
 import webbrowser
 from dataclasses import dataclass
@@ -28,7 +29,8 @@ from .media_helpers import logger
 
 AUTH_SCOPE = os.environ.get(
     "META_AUTH_SCOPE",
-    "business_management,public_profile,pages_show_list,pages_read_engagement",
+    "ads_management,ads_read,business_management,public_profile,"
+    "pages_show_list,pages_read_engagement,instagram_basic,threads_business_basic",
 )
 AUTH_CONFIG_ID = os.environ.get("META_LOGIN_CONFIG_ID", "").strip()
 AUTH_REDIRECT_URI = "http://localhost:8888/callback"
@@ -45,7 +47,7 @@ class MetaConfig:
     def __new__(cls):
         if cls._instance is None:
             obj = super().__new__(cls)
-            obj.app_id = os.environ.get("META_APP_ID", "YOUR_META_APP_ID")
+            obj.app_id = os.environ.get("META_APP_ID", "MISSING_META_APP_ID")
             cls._instance = obj
         return cls._instance
 
@@ -124,13 +126,18 @@ class AuthManager:
 
     def _cache_path(self) -> pathlib.Path:
         if platform.system() == "Windows":
-            base = pathlib.Path(os.environ.get("APPDATA", ""))
+            base = pathlib.Path(os.environ.get("APPDATA") or pathlib.Path.home())
         elif platform.system() == "Darwin":
             base = pathlib.Path.home() / "Library" / "Application Support"
         else:
             base = pathlib.Path.home() / ".config"
         cache_dir = base / "armavita-meta-ads-mcp"
         cache_dir.mkdir(parents=True, exist_ok=True)
+        # Restrict the dir holding the long-lived token to the owner (no-op on Windows).
+        try:
+            os.chmod(cache_dir, 0o700)
+        except OSError:
+            pass
         return cache_dir / "token_cache.json"
 
     def _load_cached_token(self) -> bool:
@@ -153,14 +160,38 @@ class AuthManager:
         if not self.token_info:
             return
         path = self._cache_path()
-        path.write_text(json.dumps(self.token_info.serialize()), encoding="utf-8")
+        data = json.dumps(self.token_info.serialize())
+        # Write the access token with owner-only permissions (0600). Opening with
+        # O_CREAT|0o600 sets the mode on creation; chmod re-tightens a pre-existing file.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(data)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
-    def get_auth_url(self) -> str:
+    def issue_login_state(self) -> str:
+        """Issue a fresh CSRF `state` nonce and record it for callback verification.
+
+        Only the real login flow (authenticate/login) calls this — NOT the read-only
+        error-display path — so an in-flight login nonce is never clobbered by an
+        unauthenticated tool call that merely renders an auth URL.
+        """
+        state = secrets.token_urlsafe(24)
+        token_container["expected_state"] = state
+        return state
+
+    def get_auth_url(self, state: Optional[str] = None) -> str:
+        # Pure URL builder with NO side effects. The CSRF `state` is included only
+        # when supplied by a real login flow (see issue_login_state).
         params = {
             "client_id": self.app_id,
             "redirect_uri": self.redirect_uri,
             "response_type": AUTH_RESPONSE_TYPE,
         }
+        if state:
+            params["state"] = state
         if AUTH_CONFIG_ID:
             params["config_id"] = AUTH_CONFIG_ID
         else:
@@ -172,7 +203,8 @@ class AuthManager:
             return self.token_info.meta_access_token
         port = start_callback_server()
         self.redirect_uri = f"http://localhost:{port}/callback"
-        url = self.get_auth_url()
+        state = self.issue_login_state()
+        url = self.get_auth_url(state=state)
         logger.info("Opening OAuth login URL: %s", url)
         webbrowser.open(url)
         return None
@@ -300,7 +332,7 @@ async def get_current_access_token() -> Optional[str]:
         return env_token
 
     app_id = meta_config.get_app_id()
-    if not app_id or app_id == "YOUR_META_APP_ID":
+    if not app_id or app_id == "MISSING_META_APP_ID":
         logger.error("No valid META_APP_ID configured")
         return None
 
@@ -315,14 +347,15 @@ async def get_current_access_token() -> Optional[str]:
 
 
 def login() -> None:
-    print("Starting Meta Ads authentication flow...")
+    print("Launching the Meta OAuth login flow...")
     try:
         port = start_callback_server()
         auth_manager.redirect_uri = f"http://localhost:{port}/callback"
         reset_token_container()
         token_container["redirect_uri"] = auth_manager.redirect_uri
 
-        auth_url = auth_manager.get_auth_url()
+        state = auth_manager.issue_login_state()
+        auth_url = auth_manager.get_auth_url(state=state)
         print(f"Opening browser: {auth_url}")
         webbrowser.open(auth_url)
 
@@ -342,5 +375,5 @@ def login() -> None:
         shutdown_callback_server()
 
 
-META_APP_ID = os.environ.get("META_APP_ID", "YOUR_META_APP_ID")
+META_APP_ID = os.environ.get("META_APP_ID", "MISSING_META_APP_ID")
 auth_manager = AuthManager(META_APP_ID)

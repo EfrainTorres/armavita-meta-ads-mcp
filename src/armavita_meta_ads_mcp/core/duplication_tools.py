@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import auth_state as auth
 from .graph_client import McpToolError, make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Preserve exception class identity across importlib.reload() in tests.
 if "RateLimitError" not in globals():
     class RateLimitError(McpToolError):
-        """Raised on rate-page_size errors so FastMCP sets isError: true."""
+        """Raised on rate-limit errors so FastMCP sets isError: true."""
 
 
 if "DuplicationError" not in globals():
@@ -25,66 +26,7 @@ if "DuplicationError" not in globals():
         """Raised on non-success duplication responses."""
 
 
-_DEPRECATED_ADVANTAGE_PLUS_PROMOTION_TYPES = {
-    "ADVANTAGE_PLUS_APP_CAMPAIGN",
-    "ADVANTAGE_PLUS_SHOPPING",
-    "ADVANTAGE_PLUS_SHOPPING_CAMPAIGN",
-    "AUTOMATED_SHOPPING_ADS",
-    "SMART_APP_PROMOTION",
-}
-
-_DEPRECATED_ADVANTAGE_PLUS_STATE_MARKERS = {
-    "ADVANTAGE_PLUS_APP_CAMPAIGN",
-    "ADVANTAGE_PLUS_SHOPPING_CAMPAIGN",
-}
-
-def _detect_deprecated_advantage_plus_block(campaign_data: Dict[str, Any]) -> Optional[str]:
-    """Return block reason when campaign metadata matches deprecated Advantage+ signatures."""
-    if not isinstance(campaign_data, dict):
-        return None
-
-    smart_promotion_type = str(campaign_data.get("smart_promotion_type", "")).strip().upper()
-    objective = str(campaign_data.get("objective", "")).strip().upper()
-
-    if smart_promotion_type in _DEPRECATED_ADVANTAGE_PLUS_PROMOTION_TYPES:
-        return (
-            f"Campaign uses smart_promotion_type '{smart_promotion_type}', which matches "
-            "deprecated Advantage+ Shopping/App campaign flows blocked in v25 duplication."
-        )
-
-    if smart_promotion_type and "ADVANTAGE" in smart_promotion_type:
-        if "SHOPPING" in smart_promotion_type or "APP" in smart_promotion_type:
-            return (
-                f"Campaign uses smart_promotion_type '{smart_promotion_type}', which appears "
-                "to be a deprecated Advantage+ Shopping/App flow blocked in v25 duplication."
-            )
-
-    advantage_state_info = campaign_data.get("advantage_state_info")
-    if isinstance(advantage_state_info, dict):
-        state_tokens = set()
-        for key in ("advantage_state", "campaign_type", "type", "name"):
-            value = advantage_state_info.get(key)
-            if isinstance(value, str):
-                state_tokens.add(value.strip().upper())
-        if any(token in _DEPRECATED_ADVANTAGE_PLUS_STATE_MARKERS for token in state_tokens):
-            return (
-                "Campaign advantage_state_info indicates a deprecated Advantage+ Shopping/App campaign "
-                "that cannot be duplicated under v25 constraints."
-            )
-
-    if objective == "OUTCOME_APP_PROMOTION" and smart_promotion_type and "APP" in smart_promotion_type:
-        return (
-            f"Campaign objective '{objective}' with smart_promotion_type '{smart_promotion_type}' "
-            "matches deprecated Advantage+ App duplication restrictions in v25."
-        )
-
-    if objective == "OUTCOME_SALES" and smart_promotion_type and "SHOPPING" in smart_promotion_type:
-        return (
-            f"Campaign objective '{objective}' with smart_promotion_type '{smart_promotion_type}' "
-            "matches deprecated Advantage+ Shopping duplication restrictions in v25."
-        )
-
-    return None
+from .meta_v25_guards import detect_deprecated_advantage_plus_block
 
 
 async def _resolve_campaign_id_for_resource(
@@ -121,7 +63,7 @@ async def _run_v25_duplication_preflight(
     meta_access_token: str,
 ) -> Optional[Dict[str, Any]]:
     """Return block payload when duplication targets deprecated Advantage+ campaign types."""
-    if not isinstance(meta_access_token, str) or not meta_access_token.startswith("EA"):
+    if not isinstance(meta_access_token, str) or not meta_access_token.strip():
         return None
 
     if resource_type not in {"campaign", "adset", "ad"}:
@@ -140,7 +82,7 @@ async def _run_v25_duplication_preflight(
         if not isinstance(campaign_data, dict) or "error" in campaign_data:
             return None
 
-        reason = _detect_deprecated_advantage_plus_block(campaign_data)
+        reason = detect_deprecated_advantage_plus_block(campaign_data)
         if not reason:
             return None
 
@@ -179,6 +121,10 @@ def _build_copy_params(resource_type: str, options: Dict[str, Any]) -> Tuple[Dic
 
     if resource_type == "campaign":
         params["deep_copy"] = True
+        if options.get("migrate_to_advantage_plus") is not None:
+            params["migrate_to_advantage_plus"] = (
+                "true" if bool(options.get("migrate_to_advantage_plus")) else "false"
+            )
 
         if options.get("include_ad_sets") is False:
             _append_warning(
@@ -309,6 +255,25 @@ def _extract_new_id(resource_type: str, response: Dict[str, Any]) -> Optional[st
     return None
 
 
+def _unwrap_graph_error(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Extract the inner Graph API error from a make_api_request error envelope."""
+    graph_error = data.get("error")
+    if not isinstance(graph_error, dict):
+        return None
+
+    message = str(graph_error.get("message") or graph_error.get("primary_text") or "")
+    if graph_error.get("code") is not None and not message.startswith("HTTP Error"):
+        return graph_error
+
+    details = graph_error.get("details")
+    if isinstance(details, dict):
+        nested_error = details.get("error")
+        if isinstance(nested_error, dict):
+            return nested_error
+
+    return graph_error
+
+
 def _build_graph_error_payload(
     resource_type: str,
     resource_id: str,
@@ -333,7 +298,7 @@ def _build_graph_error_payload(
     return payload
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def clone_campaign(
     campaign_id: str,
@@ -345,6 +310,7 @@ async def clone_campaign(
     copy_schedule: bool = False,
     new_daily_budget: Optional[float] = None,
     new_status: Optional[str] = "PAUSED",
+    migrate_to_advantage_plus: Optional[bool] = None,
 ) -> str:
     """Duplicate a campaign using Meta's local Graph copy edge."""
     return await _forward_duplication_request(
@@ -359,11 +325,12 @@ async def clone_campaign(
             "copy_schedule": copy_schedule,
             "new_daily_budget": new_daily_budget,
             "new_status": new_status,
+            "migrate_to_advantage_plus": migrate_to_advantage_plus,
         },
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def clone_ad_set(
     ad_set_id: str,
@@ -393,7 +360,7 @@ async def clone_ad_set(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def clone_ad(
     ad_id: str,
@@ -419,7 +386,7 @@ async def clone_ad(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def clone_ad_creative(
     ad_creative_id: str,
@@ -455,6 +422,19 @@ async def _forward_duplication_request(
 ) -> str:
     """Execute OSS-local duplication against Graph API copy edges."""
     try:
+        if not str(resource_id or "").strip():
+            raise DuplicationError(
+                json.dumps(
+                    {
+                        "success": False,
+                        "error": "invalid_parameters",
+                        "message": f"{resource_type}_id is required",
+                        "details": {"resource_type": resource_type, "resource_id": resource_id},
+                    },
+                    indent=2,
+                )
+            )
+
         facebook_token = meta_access_token if meta_access_token else await auth.get_current_access_token()
         if not facebook_token:
             raise DuplicationError(
@@ -462,7 +442,7 @@ async def _forward_duplication_request(
                     {
                         "success": False,
                         "error": "authentication_required",
-                        "message": "Meta Ads access token not found",
+                        "message": "No Meta access token is available for the duplication request",
                         "details": {
                             "required": "Valid Meta access token",
                             "check": "Authenticate and retry duplication request.",
@@ -519,7 +499,7 @@ async def _forward_duplication_request(
                 )
             )
 
-        graph_error = data.get("error") if isinstance(data.get("error"), dict) else None
+        graph_error = _unwrap_graph_error(data)
         if graph_error:
             code = graph_error.get("code")
             if code == 4:
@@ -568,7 +548,7 @@ async def _forward_duplication_request(
                 {
                     "success": False,
                     "error": "unexpected_error",
-                    "message": f"Unexpected error during {resource_type} duplication",
+                    "message": f"The {resource_type} duplication failed with an unexpected error",
                     "details": {
                         "resource_type": resource_type,
                         "resource_id": resource_id,

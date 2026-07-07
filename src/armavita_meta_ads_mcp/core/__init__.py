@@ -19,6 +19,9 @@ from .ad_tools import (
     update_ad,
     update_ad_creative,
     upload_ad_image_asset,
+    upload_ad_video_asset,
+    list_ad_images,
+    list_ad_videos,
 )
 from .ads_archive_tools import search_ads_archive
 from .adset_tools import create_ad_set, read_ad_set, list_ad_sets, update_ad_set
@@ -38,6 +41,45 @@ from .targeting_tools import (
     search_geo_locations,
     search_interests,
 )
+from .account_controls_tools import get_account_controls, update_account_controls
+from .audience_tools import (
+    create_custom_audience,
+    create_lookalike_audience,
+    delete_custom_audience,
+    list_custom_audiences,
+    manage_custom_audience_users,
+    read_custom_audience,
+    update_custom_audience,
+)
+from .capi_tools import list_business_datasets, read_dataset_quality, send_capi_events
+from .catalog_tools import (
+    batch_products,
+    list_product_catalogs,
+    list_product_sets,
+    list_products,
+    upsert_product,
+)
+from .conversion_tools import (
+    create_custom_conversion,
+    delete_custom_conversion,
+    list_custom_conversions,
+    read_custom_conversion,
+    update_custom_conversion,
+)
+from .derived_metrics_tools import list_ad_custom_derived_metrics
+from .insights_async_tools import (
+    create_insights_job,
+    read_insights_job,
+    read_insights_job_results,
+)
+from .partnership_tools import grant_branded_content_ad_permission, list_branded_content_ad_permissions
+from .reach_frequency_tools import (
+    create_reach_frequency_prediction,
+    list_reach_frequency_predictions,
+    read_reach_frequency_prediction,
+)
+from .recommendation_tools import apply_recommendation, list_recommendations
+from .threads_tools import create_threads_account, get_threads_account
 
 __all__ = [
     "mcp_server",
@@ -64,6 +106,9 @@ __all__ = [
     "export_ad_image_file",
     "update_ad",
     "upload_ad_image_asset",
+    "upload_ad_video_asset",
+    "list_ad_images",
+    "list_ad_videos",
     "create_ad_creative",
     "update_ad_creative",
     "search_pages",
@@ -84,4 +129,39 @@ __all__ = [
     "create_report",
     "search_web_content",
     "read_web_content",
+    "get_threads_account",
+    "create_threads_account",
+    "list_recommendations",
+    "apply_recommendation",
+    "get_account_controls",
+    "update_account_controls",
+    "list_custom_audiences",
+    "read_custom_audience",
+    "create_custom_audience",
+    "update_custom_audience",
+    "delete_custom_audience",
+    "manage_custom_audience_users",
+    "create_lookalike_audience",
+    "send_capi_events",
+    "read_dataset_quality",
+    "list_business_datasets",
+    "list_product_catalogs",
+    "list_products",
+    "upsert_product",
+    "batch_products",
+    "list_product_sets",
+    "list_ad_custom_derived_metrics",
+    "list_custom_conversions",
+    "read_custom_conversion",
+    "create_custom_conversion",
+    "update_custom_conversion",
+    "delete_custom_conversion",
+    "create_insights_job",
+    "read_insights_job",
+    "read_insights_job_results",
+    "list_branded_content_ad_permissions",
+    "grant_branded_content_ad_permission",
+    "create_reach_frequency_prediction",
+    "list_reach_frequency_predictions",
+    "read_reach_frequency_prediction",
 ]

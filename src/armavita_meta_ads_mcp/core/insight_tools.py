@@ -9,36 +9,30 @@ from typing import Any, Dict, List, Optional, Union
 
 from .graph_client import make_api_request, meta_api_tool
 from .insight_query_params import normalize_breakdown_inputs, normalize_time_input
+from .meta_v25_guards import append_warning, attribution_window_warning, deprecated_attribution_windows
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 _DEFAULT_FIELDS = (
     "account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,"
     "ad_id,ad_name,impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,"
-    "actions,action_values,conversions,unique_clicks,cost_per_action_type"
+    "actions,action_values,conversions,unique_clicks,cost_per_action_type,"
+    "instagram_profile_visits"
 )
 
+_VALID_LEVELS = {"ad", "adset", "campaign", "account"}
+
+# Aggregate "action_type" families that duplicate more specific rows. NOTE:
+# "offsite_conversion.fb_pixel_*" is intentionally NOT listed — those are the
+# advertiser's primary pixel conversions (purchase/add_to_cart/lead), not
+# redundant aggregates, and stripping them silently deletes core conversions.
 _REDUNDANT_ACTION_PREFIXES = (
     "omni_",
     "onsite_web_app_",
     "onsite_web_",
     "onsite_app_",
     "web_app_in_store_",
-    "offsite_conversion.fb_pixel_",
 )
-
-_DEPRECATED_ATTRIBUTION_WINDOWS = {"7d_view", "28d_view"}
-
-
-def _deprecated_windows(input_windows: Optional[List[str]]) -> List[str]:
-    if not input_windows:
-        return []
-    flags = {
-        str(window).strip().lower()
-        for window in input_windows
-        if str(window).strip().lower() in _DEPRECATED_ATTRIBUTION_WINDOWS
-    }
-    return sorted(flags)
-
 
 def _strip_redundant_actions(row: Dict[str, Any]) -> Dict[str, Any]:
     for container_key in ("actions", "action_values", "cost_per_action_type"):
@@ -59,22 +53,7 @@ def _strip_redundant_actions(row: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _with_warning(payload: Dict[str, Any], deprecated: List[str]) -> Dict[str, Any]:
-    if not deprecated:
-        return payload
-
-    warning = {
-        "code": "deprecated_attribution_windows",
-        "message": "One or more requested attribution windows are deprecated and may return empty data.",
-        "deprecated_windows": deprecated,
-        "recommended_windows": ["1d_click", "7d_click", "1d_view"],
-    }
-
-    existing = payload.get("warnings")
-    if isinstance(existing, list):
-        existing.append(warning)
-    else:
-        payload["warnings"] = [warning]
-    return payload
+    return append_warning(payload, attribution_window_warning(deprecated))
 
 
 def _append_warnings(payload: Dict[str, Any], warnings: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -88,7 +67,7 @@ def _append_warnings(payload: Dict[str, Any], warnings: List[Dict[str, Any]]) ->
     return payload
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_insights(
     object_id: str,
@@ -103,14 +82,30 @@ async def list_insights(
     page_cursor: str = "",
     action_attribution_windows: Optional[List[str]] = None,
     compact: bool = False,
+    fields: Optional[str] = None,
 ) -> str:
-    """Fetch insights for an account, campaign, ad set, or ad."""
+    """Fetch insights for an account, campaign, ad set, or ad.
+
+    Pass `fields` to request custom metrics (including names from
+    `list_ad_custom_derived_metrics`). Defaults to a standard performance bundle.
+    """
     if not str(object_id or "").strip():
-        return json.dumps({"error": "No object ID provided"}, indent=2)
+        return json.dumps({"error": "An object_id (account, campaign, ad set, or ad) is required"}, indent=2)
+
+    normalized_level = str(level or "").strip().lower()
+    if normalized_level not in _VALID_LEVELS:
+        return json.dumps(
+            {
+                "error": "invalid_level",
+                "message": f"level must be one of {sorted(_VALID_LEVELS)}.",
+                "provided": level,
+            },
+            indent=2,
+        )
 
     params: Dict[str, Any] = {
-        "fields": _DEFAULT_FIELDS,
-        "level": level,
+        "fields": fields or _DEFAULT_FIELDS,
+        "level": normalized_level,
         "page_size": int(page_size),
     }
 
@@ -131,7 +126,7 @@ async def list_insights(
     if page_cursor:
         params["page_cursor"] = page_cursor
 
-    deprecated_windows = _deprecated_windows(action_attribution_windows)
+    deprecated_windows = deprecated_attribution_windows(action_attribution_windows)
     if action_attribution_windows:
         params["action_attribution_windows"] = list(action_attribution_windows)
 

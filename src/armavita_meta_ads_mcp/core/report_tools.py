@@ -10,7 +10,10 @@ from typing import Any, Dict, List, Optional, Union
 
 from .graph_client import make_api_request, meta_api_tool
 from .insight_query_params import normalize_breakdown_inputs, normalize_time_input
+from .media_helpers import logger
+from .meta_v25_guards import append_warning, attribution_window_warning, deprecated_attribution_windows
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 _DEFAULT_INSIGHTS_FIELDS = (
     "campaign_id,campaign_name,impressions,clicks,spend,cpc,cpm,ctr,reach,frequency,"
@@ -153,14 +156,17 @@ def _build_html_report(report: Dict[str, Any]) -> str:
 def _build_simple_pdf_bytes(title: str, lines: List[str]) -> bytes:
     """Build a tiny PDF from text lines without external dependencies."""
     safe_lines = [line.replace("(", "[").replace(")", "]") for line in lines]
-    text_content = "\\n".join([f"({line}) Tj" for line in safe_lines])
+    # Each text line: emit Tj, then move down 14pt with `T*` so successive lines stack.
+    # Operators must be separated by real whitespace (not literal "\n") for PDF parsers.
+    text_content = "\n".join(f"({line}) Tj\nT*" for line in safe_lines)
 
     stream = (
         "BT\n"
         "/F1 12 Tf\n"
+        "14 TL\n"
         "50 780 Td\n"
         f"({title.replace('(', '[').replace(')', ']')}) Tj\n"
-        "0 -20 Td\n"
+        "T*\n"
         f"{text_content}\n"
         "ET"
     )
@@ -188,12 +194,17 @@ def _build_simple_pdf_bytes(title: str, lines: List[str]) -> bytes:
     return pdf.encode("utf-8")
 
 
+# Safety cap so a huge account cannot spin forever; 50 pages * 200 = 10k rows.
+_MAX_INSIGHTS_PAGES = 50
+
+
 async def _fetch_insights_rows(
     object_id: str,
     meta_access_token: str,
     time_params: Dict[str, Any],
     breakdown_params: Dict[str, str],
     level: str,
+    action_attribution_windows: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     params: Dict[str, Any] = {
         "fields": _DEFAULT_INSIGHTS_FIELDS,
@@ -202,11 +213,39 @@ async def _fetch_insights_rows(
     }
     params.update(time_params)
     params.update(breakdown_params)
+    if action_attribution_windows:
+        params["action_attribution_windows"] = list(action_attribution_windows)
 
-    data = await make_api_request(f"{object_id}/insights", meta_access_token, params)
-    if isinstance(data, dict) and isinstance(data.get("data"), list):
-        return [row for row in data["data"] if isinstance(row, dict)]
-    return []
+    # Follow cursor pagination so reports cover the full result set, not just the
+    # first page. ("after" is the Graph-native cursor; page_size maps to limit.)
+    rows: List[Dict[str, Any]] = []
+    after: Optional[str] = None
+    for _ in range(_MAX_INSIGHTS_PAGES):
+        page_params = dict(params)
+        if after:
+            page_params["after"] = after
+        data = await make_api_request(f"{object_id}/insights", meta_access_token, page_params)
+        if not isinstance(data, dict):
+            break
+        page_rows = data.get("data")
+        if isinstance(page_rows, list):
+            rows.extend(row for row in page_rows if isinstance(row, dict))
+
+        after = None
+        paging = data.get("paging")
+        if isinstance(paging, dict) and paging.get("next"):
+            cursors = paging.get("cursors")
+            if isinstance(cursors, dict):
+                after = cursors.get("after")
+        if not after:
+            break
+    else:
+        logger.warning(
+            "create_report hit the %s-page insights cap for object_id=%s; report may be truncated.",
+            _MAX_INSIGHTS_PAGES, object_id,
+        )
+
+    return rows
 
 
 def _compute_delta(current: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str, float]:
@@ -217,7 +256,7 @@ def _compute_delta(current: Dict[str, Any], prior: Dict[str, Any]) -> Dict[str, 
     return delta
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def create_report(
     ad_account_id: str,
@@ -232,6 +271,7 @@ async def create_report(
     action_breakdowns: Optional[List[str]] = None,
     summary_action_breakdowns: Optional[List[str]] = None,
     comparison_period: Optional[Union[str, Dict[str, str]]] = None,
+    action_attribution_windows: Optional[List[str]] = None,
 ) -> str:
     """Generate OSS-local performance reports for Meta Ads accounts/campaigns."""
     if not ad_account_id:
@@ -330,6 +370,9 @@ async def create_report(
     if warnings:
         report["warnings"] = warnings
 
+    deprecated = deprecated_attribution_windows(action_attribution_windows)
+    append_warning(report, attribution_window_warning(deprecated))
+
     rows: List[Dict[str, Any]] = []
     per_campaign_rows: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -340,6 +383,7 @@ async def create_report(
             base_time_params,
             breakdown_params,
             "account",
+            action_attribution_windows=action_attribution_windows,
         )
 
     if normalized_type in {"campaign", "comparison"} and campaign_ids:
@@ -350,6 +394,7 @@ async def create_report(
                 base_time_params,
                 breakdown_params,
                 "campaign",
+                action_attribution_windows=action_attribution_windows,
             )
             per_campaign_rows[campaign_id] = campaign_rows
             rows.extend(campaign_rows)
@@ -379,6 +424,7 @@ async def create_report(
                 comparison_time_params or {},
                 breakdown_params,
                 "campaign",
+                action_attribution_windows=action_attribution_windows,
             )
             comparison_rows.extend(campaign_rows)
 

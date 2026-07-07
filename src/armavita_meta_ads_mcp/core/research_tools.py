@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from . import auth_state as auth
 from .graph_client import make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 from .media_helpers import logger
 
 
@@ -22,12 +23,12 @@ def _matches_query(text: str, query_terms: List[str]) -> bool:
     return any(term in haystack for term in query_terms)
 
 
-class MetaAdsDataManager:
+class ResearchDataIndex:
     """Manages Meta Ads data for MCP search and record-read operations."""
 
     def __init__(self):
         self._cache: Dict[str, Dict[str, Any]] = {}
-        logger.debug("MetaAdsDataManager initialized")
+        logger.debug("ResearchDataIndex initialized")
 
     async def _load_ad_accounts(self, meta_access_token: str, page_size: int = 200) -> List[Dict[str, Any]]:
         try:
@@ -43,7 +44,7 @@ class MetaAdsDataManager:
                 return [item for item in data["data"] if isinstance(item, dict)]
             return []
         except Exception as e:
-            logger.error(f"Error fetching ad accounts: {e}")
+            logger.error(f"Ad account fetch failed: {e}")
             return []
 
     async def _load_campaigns(self, meta_access_token: str, ad_account_id: str, page_size: int = 25) -> List[Dict[str, Any]]:
@@ -114,7 +115,7 @@ class MetaAdsDataManager:
                 return [item for item in data["data"] if isinstance(item, dict)]
             return []
         except Exception as e:
-            logger.error(f"Error fetching businesses: {e}")
+            logger.error(f"Business list fetch failed: {e}")
             return []
 
     def _build_account_record(self, account: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,7 +123,7 @@ class MetaAdsDataManager:
         return {
             "id": record_id,
             "type": "account",
-            "title": f"Ad Account: {account.get('name', 'Unnamed Account')}",
+            "title": f"Ad Account: {account.get('name', '(unnamed account)')}",
             "text": (
                 f"Meta Ads Account {account.get('name', 'Unnamed')} (ID: {account.get('id', 'N/A')}) - "
                 f"Status: {account.get('account_status', 'Unknown')}, Currency: {account.get('currency', 'Unknown')}, "
@@ -148,7 +149,7 @@ class MetaAdsDataManager:
         return {
             "id": record_id,
             "type": "campaign",
-            "title": f"Campaign: {campaign.get('name', 'Unnamed Campaign')}",
+            "title": f"Campaign: {campaign.get('name', '(unnamed campaign)')}",
             "text": (
                 f"Meta Ads Campaign {campaign.get('name', 'Unnamed')} (ID: {campaign.get('id', 'N/A')}) - "
                 f"Objective: {campaign.get('objective', 'Unknown')}, Status: {campaign.get('status', 'Unknown')}, "
@@ -173,7 +174,7 @@ class MetaAdsDataManager:
         return {
             "id": record_id,
             "type": "ad",
-            "title": f"Ad: {ad.get('name', 'Unnamed Ad')}",
+            "title": f"Ad: {ad.get('name', '(unnamed ad)')}",
             "text": (
                 f"Meta Ad {ad.get('name', 'Unnamed')} (ID: {ad.get('id', 'N/A')}) - "
                 f"Status: {ad.get('status', 'Unknown')}, Bid Amount: ${ad.get('bid_amount', 'Not set')}, "
@@ -197,7 +198,7 @@ class MetaAdsDataManager:
         return {
             "id": record_id,
             "type": "page",
-            "title": f"Facebook Page: {page.get('name', 'Unnamed Page')}",
+            "title": f"Facebook Page: {page.get('name', '(unnamed page)')}",
             "text": (
                 f"Facebook Page {page.get('name', 'Unnamed')} (ID: {page.get('id', 'N/A')}) - "
                 f"Source: {page.get('source', 'Unknown')}, Account: {account_name}"
@@ -218,7 +219,7 @@ class MetaAdsDataManager:
         return {
             "id": record_id,
             "type": "business",
-            "title": f"Business: {business.get('name', 'Unnamed Business')}",
+            "title": f"Business: {business.get('name', '(unnamed business)')}",
             "text": (
                 f"Meta Business {business.get('name', 'Unnamed')} (ID: {business.get('id', 'N/A')}) - "
                 f"Created: {business.get('created_time', 'Unknown')}, "
@@ -241,7 +242,7 @@ class MetaAdsDataManager:
 
     async def search_records(self, query: str, meta_access_token: str) -> List[str]:
         """Search Meta Ads data and return matching record IDs."""
-        logger.info(f"Searching Meta Ads data with query: {query}")
+        logger.info(f"Running research search for query: {query}")
 
         query_terms = re.findall(r"\w+", query.lower())
         if not query_terms:
@@ -313,7 +314,7 @@ class MetaAdsDataManager:
             logger.error(f"Error during search_web_content operation: {e}")
             return []
 
-        logger.info(f"Search completed. Found {len(matching_ids)} matching records")
+        logger.info(f"Research search finished with {len(matching_ids)} hits")
         return matching_ids[:50]
 
     @staticmethod
@@ -393,7 +394,7 @@ class MetaAdsDataManager:
 
     async def fetch_record(self, record_id: str, meta_access_token: Optional[str]) -> Optional[Dict[str, Any]]:
         """Fetch a record by ID. Uses cache first, then Graph API fallback."""
-        logger.info(f"Fetching record: {record_id}")
+        logger.info(f"Loading research record {record_id}")
 
         cached = self._cache.get(record_id)
         if cached:
@@ -414,10 +415,10 @@ class MetaAdsDataManager:
         return None
 
 
-_data_manager = MetaAdsDataManager()
+_data_manager = ResearchDataIndex()
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_web_content(
     query: str,
@@ -450,7 +451,7 @@ async def search_web_content(
         )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def read_web_content(resource_id: str) -> str:
     """Fetch complete record data by ID using cache-first + API fallback behavior."""
     if not resource_id:

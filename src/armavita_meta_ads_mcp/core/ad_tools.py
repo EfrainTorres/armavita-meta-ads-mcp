@@ -16,6 +16,7 @@ from PIL import Image as PILImage
 
 from .graph_client import McpToolError, make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 from .media_helpers import (
     download_image,
     extract_creative_image_urls,
@@ -429,7 +430,60 @@ def _build_tracking_specs(tracking_specs: Optional[List[Dict[str, Any]]]) -> Opt
     return json.dumps(tracking_specs)
 
 
-@mcp_server.tool()
+def _validate_tracking_specs(tracking_specs: Optional[List[Dict[str, Any]]]) -> Optional[Dict[str, Any]]:
+    if tracking_specs is None:
+        return None
+    warnings: List[str] = []
+    for index, spec in enumerate(tracking_specs):
+        if not isinstance(spec, dict):
+            return {"error": f"tracking_specs[{index}] must be an object"}
+        if not spec.get("action.type") and not spec.get("action", {}).get("type"):
+            warnings.append(f"tracking_specs[{index}] missing action.type")
+    if warnings:
+        return {"warnings": warnings}
+    return None
+
+
+def _build_carousel_story_spec(
+    facebook_page_id: str,
+    carousel_cards: List[Dict[str, Any]],
+    primary_text: Optional[str],
+    link_url: Optional[str],
+) -> Dict[str, Any]:
+    child_attachments: List[Dict[str, Any]] = []
+    for card in carousel_cards:
+        if not isinstance(card, dict):
+            continue
+        attachment: Dict[str, Any] = {}
+        if card.get("link"):
+            attachment["link"] = card["link"]
+        if card.get("name"):
+            attachment["name"] = card["name"]
+        if card.get("description"):
+            attachment["description"] = card["description"]
+        if card.get("image_hash"):
+            attachment["image_hash"] = card["image_hash"]
+        if card.get("video_id"):
+            attachment["video_id"] = card["video_id"]
+        if card.get("call_to_action"):
+            attachment["call_to_action"] = card["call_to_action"]
+        if attachment:
+            child_attachments.append(attachment)
+
+    link_data: Dict[str, Any] = {"child_attachments": child_attachments}
+    if primary_text:
+        link_data["message"] = primary_text
+    if link_url:
+        link_data["link"] = link_url
+    link_data["ad_formats"] = ["CAROUSEL"]
+
+    return {
+        "page_id": facebook_page_id,
+        "link_data": link_data,
+    }
+
+
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_ads(
     ad_account_id: str,
@@ -439,6 +493,11 @@ async def list_ads(
     ad_set_id: str = "",
     page_cursor: str = "",
 ) -> str:
+    """List ads under an ad account, optionally scoped to a campaign or ad set.
+
+    Pass `campaign_id` or `ad_set_id` to narrow results; otherwise lists all ads
+    on the account. Cursor-paginate with `page_cursor`.
+    """
     if not ad_account_id:
         return _json({"error": "No account ID specified"})
 
@@ -453,9 +512,10 @@ async def list_ads(
     return _json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def read_ad(ad_id: str, meta_access_token: Optional[str] = None) -> str:
+    """Read a single ad's full metadata, including its preview shareable link."""
     if not ad_id:
         return _json({"error": "No ad ID provided"})
 
@@ -467,7 +527,7 @@ async def read_ad(ad_id: str, meta_access_token: Optional[str] = None) -> str:
     return _json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_ad_previews(
     ad_id: str,
@@ -478,6 +538,12 @@ async def list_ad_previews(
     width: Optional[int] = None,
     height: Optional[int] = None,
 ) -> str:
+    """Generate rendered previews of an ad across placements/formats.
+
+    `ad_format` is an AdPreview enum (e.g. MOBILE_FEED_STANDARD,
+    INSTAGRAM_STANDARD, FACEBOOK_STORY_MOBILE); if omitted, valid formats are
+    probed automatically. Optional `locale`, `render_type`, `width`/`height`.
+    """
     if not ad_id:
         return _json({"error": "No ad ID provided"})
 
@@ -516,9 +582,10 @@ async def list_ad_previews(
     return _json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def read_ad_creative(ad_creative_id: str, meta_access_token: Optional[str] = None) -> str:
+    """Read an ad creative's full spec, including its dynamic_creative_spec when present."""
     if not ad_creative_id:
         return _json({"error": "No creative ID provided"})
 
@@ -535,7 +602,7 @@ async def read_ad_creative(ad_creative_id: str, meta_access_token: Optional[str]
     return _json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def create_ad(
     ad_account_id: str,
@@ -545,8 +612,15 @@ async def create_ad(
     status: str = "PAUSED",
     bid_amount: Optional[int] = None,
     tracking_specs: Optional[List[Dict[str, Any]]] = None,
+    conversion_domain: Optional[str] = None,
     meta_access_token: Optional[str] = None,
 ) -> str:
+    """Create an ad that pairs an existing ad creative with an ad set.
+
+    Requires an `ad_creative_id` (from create_ad_creative). Defaults to PAUSED
+    status. `conversion_domain` is required for some website-conversion ads;
+    `bid_amount` (minor units) and `tracking_specs` are optional.
+    """
     if not ad_account_id:
         return _json({"error": "No account ID provided"})
     if not name:
@@ -564,22 +638,31 @@ async def create_ad(
     }
     if bid_amount is not None:
         payload["bid_amount"] = str(bid_amount)
+    if conversion_domain:
+        payload["conversion_domain"] = conversion_domain
+
+    tracking_warning = _validate_tracking_specs(tracking_specs)
+    if tracking_warning and tracking_warning.get("error"):
+        return _json(tracking_warning)
 
     encoded_tracking = _build_tracking_specs(tracking_specs)
     if encoded_tracking is not None:
         payload["tracking_specs"] = encoded_tracking
 
     result = await make_api_request(f"{ad_account_id}/ads", meta_access_token, payload, method="POST")
+    if isinstance(result, dict) and tracking_warning and tracking_warning.get("warnings"):
+        result["_warning"] = tracking_warning["warnings"]
     return _json(result)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_ad_creatives(
     ad_id: str,
     meta_access_token: Optional[str] = None,
     page_cursor: str = "",
 ) -> str:
+    """List the ad creatives attached to an ad, with viewable image URLs extracted."""
     if not ad_id:
         return _json({"error": "No ad ID provided"})
 
@@ -601,9 +684,10 @@ async def list_ad_creatives(
     return _json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def read_ad_image(ad_id: str, meta_access_token: Optional[str] = None) -> Image:
+    """Fetch and return the primary image of an ad as binary image content."""
     if not ad_id:
         _ad_image_error(str(ad_id), "validation", "No ad ID provided")
 
@@ -640,13 +724,14 @@ async def read_ad_image(ad_id: str, meta_access_token: Optional[str] = None) -> 
         _ad_image_error(ad_id, "process_image", f"Error processing image: {exc}")
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def export_ad_image_file(
     ad_id: str,
     meta_access_token: Optional[str] = None,
     output_dir: str = "ad_images",
 ) -> str:
+    """Download an ad's primary image to a local file and return the saved path."""
     if not ad_id:
         return _json({"error": "No ad ID provided"})
 
@@ -662,7 +747,7 @@ async def export_ad_image_file(
     return _json({"filepath": file_path})
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 @meta_api_tool
 async def update_ad(
     ad_id: str,
@@ -672,6 +757,12 @@ async def update_ad(
     ad_creative_id: Optional[str] = None,
     meta_access_token: Optional[str] = None,
 ) -> str:
+    """Update an existing ad's status, bid_amount, tracking_specs, or creative.
+
+    Pass `ad_creative_id` to swap the ad's creative. To change creative *content*
+    (text/image/URL), build a new creative with create_ad_creative first, then
+    pass its id here.
+    """
     if not ad_id:
         return _json({"error": "Ad ID is required"})
 
@@ -683,7 +774,11 @@ async def update_ad(
     if tracking_specs is not None:
         payload["tracking_specs"] = json.dumps(tracking_specs)
     if ad_creative_id is not None:
-        payload["creative"] = json.dumps({"ad_creative_id": ad_creative_id})
+        # Pass a plain dict (matching create_ad) so the shared request pipeline
+        # remaps ad_creative_id -> creative_id and JSON-encodes it. Pre-serializing
+        # here would hide the inner key from the remapper and send the invalid
+        # creative={"ad_creative_id": ...}, which Meta rejects.
+        payload["creative"] = {"ad_creative_id": ad_creative_id}
 
     if not payload:
         return _json({"error": "No update parameters provided (status, bid_amount, tracking_specs, or ad_creative_id)"})
@@ -741,7 +836,7 @@ def _normalize_uploaded_images_payload(payload: Dict[str, Any], ad_account_id: s
     }
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def upload_ad_image_asset(
     ad_account_id: str,
@@ -750,6 +845,11 @@ async def upload_ad_image_asset(
     image_source_url: Optional[str] = None,
     name: Optional[str] = None,
 ) -> str:
+    """Upload an image to the account's ad-image library and return its hash.
+
+    Provide exactly one source: a local `image_file_path` or a remote
+    `image_source_url`. The returned image hash is used in creative specs.
+    """
     if not ad_account_id:
         return _json({"error": "No account ID provided"})
 
@@ -774,6 +874,11 @@ async def upload_ad_image_asset(
                     "image/gif": ".gif",
                 }.get(mime_type, ".png")
                 inferred_name = f"upload{extension}"
+        elif os.path.isfile(image_file_path):
+            with open(image_file_path, "rb") as image_fh:
+                encoded_image = base64.b64encode(image_fh.read()).decode("utf-8")
+            if not inferred_name:
+                inferred_name = os.path.basename(image_file_path)
         else:
             encoded_image = image_file_path.strip()
             if not inferred_name:
@@ -784,8 +889,8 @@ async def upload_ad_image_asset(
         except Exception as exc:  # noqa: BLE001
             return _json(
                 {
-                    "error": "We couldn’t download the image from the link provided.",
-                    "reason": "The server returned an error while trying to fetch the image.",
+                    "error": "Downloading the image from the supplied URL failed.",
+                    "reason": "The remote host responded with an error while the image was being fetched.",
                     "image_source_url": image_source_url,
                     "details": str(exc),
                     "suggestions": [
@@ -799,7 +904,7 @@ async def upload_ad_image_asset(
         if not image_bytes:
             return _json(
                 {
-                    "error": "We couldn’t access the image at the link you provided.",
+                    "error": "The image URL could not be opened.",
                     "reason": "The URL is not publicly accessible or returned empty data.",
                     "image_source_url": image_source_url,
                     "suggestions": [
@@ -822,6 +927,112 @@ async def upload_ad_image_asset(
 
     response = await make_api_request(f"{normalized_account_id}/adimages", meta_access_token, api_payload, method="POST")
     return _json(_normalize_uploaded_images_payload(response, normalized_account_id, final_name))
+
+
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+@meta_api_tool
+async def list_ad_images(
+    ad_account_id: str,
+    meta_access_token: Optional[str] = None,
+    page_size: int = 25,
+    page_cursor: str = "",
+    hashes: Optional[List[str]] = None,
+) -> str:
+    """List images in the ad account image library."""
+    if not ad_account_id:
+        return _json({"error": "No account ID provided"})
+
+    normalized_account_id = _normalize_ad_account_id(ad_account_id)
+    params: Dict[str, Any] = {
+        "fields": "hash,url,width,height,name,status,created_time,updated_time",
+        "page_size": int(page_size),
+    }
+    if page_cursor:
+        params["page_cursor"] = page_cursor
+    if hashes:
+        params["hashes"] = json.dumps([str(item).strip() for item in hashes if str(item).strip()])
+
+    payload = await make_api_request(f"{normalized_account_id}/adimages", meta_access_token, params)
+    return _json(payload)
+
+
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+@meta_api_tool
+async def list_ad_videos(
+    ad_account_id: str,
+    meta_access_token: Optional[str] = None,
+    page_size: int = 25,
+    page_cursor: str = "",
+) -> str:
+    """List videos in the ad account video library."""
+    if not ad_account_id:
+        return _json({"error": "No account ID provided"})
+
+    normalized_account_id = _normalize_ad_account_id(ad_account_id)
+    params: Dict[str, Any] = {
+        "fields": "id,title,description,source,picture,length,status,created_time,updated_time",
+        "page_size": int(page_size),
+    }
+    if page_cursor:
+        params["page_cursor"] = page_cursor
+
+    payload = await make_api_request(f"{normalized_account_id}/advideos", meta_access_token, params)
+    return _json(payload)
+
+
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
+@meta_api_tool
+async def upload_ad_video_asset(
+    ad_account_id: str,
+    meta_access_token: Optional[str] = None,
+    video_file_path: Optional[str] = None,
+    video_source_url: Optional[str] = None,
+    name: Optional[str] = None,
+    title: Optional[str] = None,
+    description: Optional[str] = None,
+) -> str:
+    """Upload a video to the ad account video library."""
+    if not ad_account_id:
+        return _json({"error": "No account ID provided"})
+    if not video_file_path and not video_source_url:
+        return _json({"error": "Provide either video_file_path or video_source_url"})
+
+    normalized_account_id = _normalize_ad_account_id(ad_account_id)
+    api_payload: Dict[str, Any] = {}
+    files: Optional[Dict[str, Any]] = None
+
+    if video_source_url:
+        api_payload["file_url"] = video_source_url
+    elif video_file_path and os.path.isfile(video_file_path):
+        with open(video_file_path, "rb") as video_fh:
+            files = {"source": (os.path.basename(video_file_path), video_fh.read(), "video/mp4")}
+    else:
+        return _json({"error": "video_file_path must be a readable local file path"})
+
+    if name:
+        api_payload["name"] = name
+    if title:
+        api_payload["title"] = title
+    if description:
+        api_payload["description"] = description
+
+    response = await make_api_request(
+        f"{normalized_account_id}/advideos",
+        meta_access_token,
+        api_payload,
+        method="POST",
+        files=files,
+    )
+    if isinstance(response, dict) and response.get("id"):
+        return _json(
+            {
+                "success": True,
+                "ad_account_id": normalized_account_id,
+                "ad_video_id": response.get("id"),
+                "raw_response": response,
+            }
+        )
+    return _json(response)
 
 
 def _sanitize_instagram_identity(
@@ -847,8 +1058,11 @@ def _build_simple_image_story_spec(
 ) -> Dict[str, Any]:
     link_data: Dict[str, Any] = {
         "image_hash": ad_image_hash,
-        "link": link_url,
     }
+    # Only set `link` when a destination URL exists. Lead-form-only and
+    # catalog creatives have no link_url; sending link=null is rejected by Meta.
+    if link_url:
+        link_data["link"] = link_url
 
     if primary_text:
         link_data["message"] = primary_text
@@ -960,13 +1174,8 @@ def _build_asset_feed_spec_payload(
             },
         }
     else:
-        anchor_hash = image_pool[0].get("hash") if image_pool else None
-        link_data = {"link": link_url}
-        if anchor_hash:
-            link_data["image_hash"] = anchor_hash
         story_spec = {
             "page_id": None,
-            "link_data": link_data,
         }
 
     return feed, story_spec
@@ -983,7 +1192,7 @@ async def _resolve_page_id_for_creative(
     discovery = await _discover_pages_for_account(ad_account_id, meta_access_token)
     if not discovery.get("success"):
         return None, {
-            "error": "No page ID provided and no suitable pages found for this account",
+            "error": "page_id was omitted and no usable Facebook Page could be discovered on this account",
             "details": discovery.get("message", "Page discovery failed"),
             "suggestions": [
                 "Use list_account_pages to list available pages.",
@@ -995,7 +1204,7 @@ async def _resolve_page_id_for_creative(
     return str(discovery["facebook_page_id"]), None
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True))
 @meta_api_tool
 async def create_ad_creative(
     ad_account_id: str,
@@ -1017,10 +1226,34 @@ async def create_ad_creative(
     dynamic_creative_spec: Optional[Dict[str, Any]] = None,
     call_to_action_type: Optional[str] = None,
     lead_form_id: Optional[str] = None,
-    instagram_actor_id: Optional[str] = None,
+    instagram_user_id: Optional[str] = None,
+    threads_user_id: Optional[str] = None,
     ad_formats: Optional[List[str]] = None,
     asset_customization_rules: Optional[List[Dict[str, Any]]] = None,
+    destination_spec: Optional[Dict[str, Any]] = None,
+    degrees_of_freedom_spec: Optional[Dict[str, Any]] = None,
+    creative_features_spec: Optional[Dict[str, Any]] = None,
+    carousel_cards: Optional[List[Dict[str, Any]]] = None,
+    product_set_id: Optional[str] = None,
+    url_tags: Optional[str] = None,
 ) -> str:
+    """Create an ad creative.
+
+    Identity fields:
+      * `facebook_page_id` (auto-discovered if omitted) — required for FB delivery.
+      * `instagram_user_id` — required for IG delivery (`instagram_actor_id`
+        deprecated all-versions Sep 9, 2025).
+      * `threads_user_id` — required for Threads delivery; obtain via
+        `get_threads_account` / `create_threads_account`.
+
+    Spec fields (v24.0+ creative AI):
+      * `destination_spec` — Website Destination Optimization (Meta picks the
+        best landing page).
+      * `degrees_of_freedom_spec` — pair with `optimization_type='DEGREES_OF_FREEDOM'`
+        to enable Meta-side asset combinatorics.
+      * `creative_features_spec` — Standard Enhancements / AI Sandbox creative
+        toggles (image expansion, text variations, etc.).
+    """
     if not ad_account_id:
         return _json({"error": "No account ID provided"})
 
@@ -1031,9 +1264,16 @@ async def create_ad_creative(
     ad_formats = _normalize_list_argument(ad_formats)
     asset_customization_rules = _normalize_list_argument(asset_customization_rules)
 
-    media_error = _ensure_single_media_choice(ad_image_hash, ad_image_hashes, ad_video_id)
-    if media_error:
-        return _json({"error": media_error})
+    carousel_cards = _normalize_list_argument(carousel_cards) or []
+
+    if carousel_cards:
+        if not link_url and not lead_form_id:
+            return _json({"error": "link_url or lead_form_id is required for carousel creatives"})
+    else:
+        if not product_set_id:
+            media_error = _ensure_single_media_choice(ad_image_hash, ad_image_hashes, ad_video_id)
+            if media_error:
+                return _json({"error": media_error})
 
     if ad_image_hashes and len(ad_image_hashes) > 10:
         return _json({"error": "Maximum 10 image hashes allowed for FLEX creatives"})
@@ -1055,10 +1295,10 @@ async def create_ad_creative(
     if normalized_lists_error:
         return _json(normalized_lists_error)
 
-    if not link_url and not lead_form_id:
+    if not link_url and not lead_form_id and not product_set_id:
         return _json(
             {
-                "error": "No link_url provided. A destination URL is required for ad creatives (unless using lead_form_id)."
+                "error": "No link_url provided. A destination URL is required for ad creatives (unless using lead_form_id or product_set_id)."
             }
         )
 
@@ -1076,15 +1316,30 @@ async def create_ad_creative(
         return _json(page_error)
 
     resolved_instagram_user_id, resolved_instagram_actor_id = _sanitize_instagram_identity(
+        instagram_user_id,
         None,
-        instagram_actor_id,
     )
 
-    use_asset_feed = bool(primary_text_variants or headline_variants or description_variants or ad_image_hashes or optimization_type)
+    use_asset_feed = bool(
+        primary_text_variants or headline_variants or description_variants or ad_image_hashes or optimization_type
+    )
 
     creative_payload: Dict[str, Any] = {"name": final_name}
+    if url_tags:
+        creative_payload["url_tags"] = url_tags
+    if product_set_id:
+        creative_payload["product_set_id"] = str(product_set_id).strip()
 
-    if use_asset_feed:
+    if carousel_cards:
+        creative_payload["object_story_spec"] = _build_carousel_story_spec(
+            facebook_page_id=resolved_page_id,
+            carousel_cards=carousel_cards,
+            primary_text=primary_text,
+            link_url=link_url,
+        )
+        if not ad_formats:
+            ad_formats = ["CAROUSEL"]
+    elif use_asset_feed:
         feed, story_spec = _build_asset_feed_spec_payload(
             link_url=link_url,
             normalized_assets=normalized_assets,
@@ -1124,13 +1379,32 @@ async def create_ad_creative(
                 lead_form_id=lead_form_id,
             )
 
+    if product_set_id and not carousel_cards:
+        story_spec = creative_payload.setdefault("object_story_spec", {"page_id": resolved_page_id})
+        if "template_data" not in story_spec:
+            story_spec["template_data"] = {
+                "link": link_url,
+                "message": primary_text,
+                "name": headline_text,
+                "description": description_text,
+            }
+
     if dynamic_creative_spec:
         creative_payload["dynamic_creative_spec"] = dynamic_creative_spec
+    if destination_spec:
+        creative_payload["destination_spec"] = destination_spec
+    if degrees_of_freedom_spec:
+        creative_payload["degrees_of_freedom_spec"] = degrees_of_freedom_spec
+    if creative_features_spec:
+        creative_payload["creative_features_spec"] = creative_features_spec
 
     if resolved_instagram_user_id:
         creative_payload["object_story_spec"]["instagram_user_id"] = resolved_instagram_user_id
     elif resolved_instagram_actor_id:
         creative_payload["object_story_spec"]["instagram_actor_id"] = resolved_instagram_actor_id
+
+    if threads_user_id:
+        creative_payload["object_story_spec"]["threads_user_id"] = str(threads_user_id).strip()
 
     creation_result = await make_api_request(f"{normalized_account_id}/adcreatives", meta_access_token, creative_payload, method="POST")
 
@@ -1161,7 +1435,7 @@ async def create_ad_creative(
     return _json(creation_result if isinstance(creation_result, dict) else {"data": creation_result})
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True))
 @meta_api_tool
 async def update_ad_creative(
     ad_creative_id: str,
@@ -1178,7 +1452,16 @@ async def update_ad_creative(
     call_to_action_type: Optional[str] = None,
     lead_form_id: Optional[str] = None,
     ad_formats: Optional[List[str]] = None,
+    destination_spec: Optional[Dict[str, Any]] = None,
+    degrees_of_freedom_spec: Optional[Dict[str, Any]] = None,
+    creative_features_spec: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Update mutable fields on an ad creative (name, optimization, dynamic spec).
+
+    Meta treats creative *content* (text/image/link) as immutable after creation;
+    this tool rejects content-field edits and surfaces Meta's immutability error.
+    Use it for name, optimization_type, dynamic_creative_spec, and related specs.
+    """
     if not ad_creative_id:
         return _json({"error": "No creative ID provided"})
 
@@ -1238,6 +1521,12 @@ async def update_ad_creative(
 
     if dynamic_creative_spec:
         update_payload["dynamic_creative_spec"] = dynamic_creative_spec
+    if destination_spec:
+        update_payload["destination_spec"] = destination_spec
+    if degrees_of_freedom_spec:
+        update_payload["degrees_of_freedom_spec"] = degrees_of_freedom_spec
+    if creative_features_spec:
+        update_payload["creative_features_spec"] = creative_features_spec
 
     if not update_payload:
         return _json({"error": "No update parameters provided"})
@@ -1247,7 +1536,7 @@ async def update_ad_creative(
     except Exception as exc:  # noqa: BLE001
         return _json(
             {
-                "error": "Failed to update ad creative",
+                "error": "The ad creative update did not succeed",
                 "details": str(exc),
                 "update_data_sent": update_payload,
             }
@@ -1445,7 +1734,7 @@ async def _discover_pages_for_account(ad_account_id: str, meta_access_token: str
 
         return {
             "success": False,
-            "message": "No suitable pages found for this account",
+            "message": "Could not discover a usable Facebook Page on this account",
             "failed_sources": discovery.get("failures", []),
             "note": "Use list_account_pages for full diagnostics or provide facebook_page_id manually.",
         }
@@ -1466,7 +1755,7 @@ async def _search_pages_core(meta_access_token: str, ad_account_id: str, query: 
             return _json(
                 {
                     "data": [],
-                    "message": "No pages found for this account",
+                    "message": "This account has no Facebook Pages available",
                     "failed_sources": discovery.get("failures", []),
                 }
             )
@@ -1495,21 +1784,23 @@ async def _search_pages_core(meta_access_token: str, ad_account_id: str, query: 
         return _json({"error": "Failed to search pages by name", "details": str(exc)})
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_pages(
     ad_account_id: str,
     meta_access_token: Optional[str] = None,
     query: Optional[str] = None,
 ) -> str:
+    """Search Facebook Pages the account can advertise with, by name/keyword."""
     if not ad_account_id:
         return _json({"error": "No account ID provided"})
     return await _search_pages_core(meta_access_token, ad_account_id, query)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def list_account_pages(ad_account_id: str, meta_access_token: Optional[str] = None) -> str:
+    """List the Facebook Pages connected to / promotable by this ad account."""
     if not ad_account_id:
         return _json({"error": "No account ID provided"})
 
@@ -1543,7 +1834,7 @@ async def list_account_pages(ad_account_id: str, meta_access_token: Optional[str
         return _json(
             {
                 "data": [],
-                "message": "No pages found associated with this account",
+                "message": "No Facebook Page is linked to this ad account",
                 "source_counts": discovery.get("source_counts", {}),
                 "failed_sources": discovery.get("failures", []),
                 "suggestion": (

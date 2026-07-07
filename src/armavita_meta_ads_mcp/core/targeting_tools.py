@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 
 from .graph_client import make_api_request, meta_api_tool
 from .mcp_runtime import mcp_server
+from mcp.types import ToolAnnotations
 
 
 def _as_json(payload: Dict[str, Any]) -> str:
@@ -79,7 +80,7 @@ def _missing_location_error_payload(error_obj: Dict[str, Any], ad_account_id: st
 
     error_data = error_obj.get("error_data") if isinstance(error_obj.get("error_data"), dict) else {}
     return {
-        "error": "Missing target audience location",
+        "error": "Targeting lacks an audience location",
         "details": error_obj.get("error_user_msg")
         or "Select at least one location, or choose a custom audience.",
         "endpoint_used": f"{ad_account_id}/reachestimate",
@@ -100,7 +101,7 @@ def _normalize_reach_result(
     if isinstance(data, list):
         if not data:
             return {
-                "error": "No estimation data returned from Meta API",
+                "error": "Meta returned an empty estimate payload",
                 "raw_response": payload,
                 "debug_info": {
                     "response_type": str(type(payload)),
@@ -117,8 +118,9 @@ def _normalize_reach_result(
             "estimated_audience_size": first.get("estimate_mau", 0),
             "estimate_details": {
                 "monthly_active_users": first.get("estimate_mau", 0),
-                "daily_outcomes_curve": first.get("estimate_dau", []),
-                "bid_estimate": first.get("bid_estimates", {}),
+                "daily_active_users": first.get("estimate_dau", 0),
+                "daily_outcomes_curve": first.get("daily_outcomes_curve", []),
+                "bid_estimate": first.get("bid_estimate", {}),
                 "unsupported_targeting": first.get("unsupported_targeting", []),
             },
             "raw_response": payload,
@@ -155,7 +157,7 @@ def _normalize_reach_result(
         return result
 
     return {
-        "error": "No estimation data returned from Meta API",
+        "error": "Meta returned an empty estimate payload",
         "raw_response": payload,
         "debug_info": {
             "response_type": str(type(payload)),
@@ -188,7 +190,7 @@ async def _run_delivery_estimate_fallback(
     )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_interests(
     query: str,
@@ -212,7 +214,7 @@ async def search_interests(
     return _as_json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def suggest_interests(
     interest_list: List[str],
@@ -236,7 +238,7 @@ async def suggest_interests(
     return _as_json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def estimate_audience_size(
     meta_access_token: Optional[str] = None,
@@ -281,7 +283,7 @@ async def estimate_audience_size(
     if not targeting:
         return _as_json(
             {
-                "error": "targeting specification is required for comprehensive audience estimation",
+                "error": "A targeting spec must be supplied to run the comprehensive estimate",
                 "example": {
                     "age_min": 25,
                     "age_max": 65,
@@ -294,9 +296,9 @@ async def estimate_audience_size(
     if not _has_location_or_custom_audience(targeting):
         return _as_json(
             {
-                "error": "Missing target audience location",
-                "details": "Select at least one location in targeting.geo_locations or include a custom audience.",
-                "action_required": "Add geo_locations with countries/regions/cities/zips or include custom_audiences.",
+                "error": "Targeting lacks an audience location",
+                "details": "Every estimate needs at least one geo_locations entry or a custom audience in the targeting spec.",
+                "action_required": "Extend targeting with geo_locations (countries, regions, cities, or zips) or add custom_audiences.",
                 "example": {
                     "geo_locations": {"countries": ["US"]},
                     "age_min": 25,
@@ -324,7 +326,7 @@ async def estimate_audience_size(
             if fallback_disabled:
                 return _as_json(
                     {
-                        "error": "Graph API returned an error for reachestimate",
+                        "error": "The reachestimate edge returned an error",
                         "details": reach_payload.get("error"),
                         "endpoint_used": f"{ad_account_id}/reachestimate",
                         "request_params": {"has_targeting_spec": bool(targeting)},
@@ -343,7 +345,7 @@ async def estimate_audience_size(
 
             return _as_json(
                 {
-                    "error": "Graph API returned an error for reachestimate; delivery_estimate fallback did not return usable data",
+                    "error": "Both the reachestimate edge and the delivery_estimate fallback failed to produce usable data",
                     "reachestimate_error": reach_payload.get("error"),
                     "fallback_endpoint_used": "delivery_estimate",
                     "fallback_raw_response": fallback_result,
@@ -376,14 +378,14 @@ async def estimate_audience_size(
         return _as_json(
             {
                 "error": f"Failed to get audience estimation from reachestimate endpoint: {exc}",
-                "details": "Check targeting parameters and account permissions",
+                "details": "Review the targeting spec and confirm the token can access this account",
                 "error_type": "general_api_error",
                 "endpoint_used": f"{ad_account_id}/reachestimate",
             }
         )
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_behaviors(
     meta_access_token: Optional[str] = None,
@@ -402,7 +404,7 @@ async def search_behaviors(
     return _as_json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_demographics(
     meta_access_token: Optional[str] = None,
@@ -422,7 +424,7 @@ async def search_demographics(
     return _as_json(payload)
 
 
-@mcp_server.tool()
+@mcp_server.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 @meta_api_tool
 async def search_geo_locations(
     query: str,
