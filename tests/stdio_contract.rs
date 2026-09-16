@@ -67,7 +67,7 @@ async fn binary_negotiates_lists_tools_and_returns_structured_errors() {
         .iter()
         .map(|tool| tool.name.as_ref())
         .collect::<Vec<_>>();
-    assert_eq!(names.len(), 77);
+    assert_eq!(names.len(), 125);
     assert!(names.windows(2).all(|pair| pair[0] < pair[1]));
     for required in [
         "apply_mutation_plan",
@@ -122,7 +122,7 @@ async fn binary_supports_current_discovery_and_result_shape() {
     assert_eq!(server_info.name, "armavita-meta-ads-mcp");
 
     let tools = client.list_all_tools().await.unwrap();
-    assert_eq!(tools.len(), 77);
+    assert_eq!(tools.len(), 125);
 
     let result = client
         .call_tool(CallToolRequestParams::new("list_ad_accounts"))

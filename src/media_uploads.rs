@@ -7,7 +7,12 @@ use std::{
 };
 
 use reqwest::Url;
-use rmcp::schemars::{self, JsonSchema};
+use rmcp::{
+    Json,
+    handler::server::wrapper::Parameters,
+    schemars::{self, JsonSchema},
+    tool, tool_router,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -15,10 +20,12 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use crate::{
     error::{GraphError, PublicError, ToolResponse},
     graph::GraphClient,
+    graph_tools::{self, GraphData},
     meta_ids::{
         ad_account as normalize_account_id, ad_account_digits, numeric_value as value_numeric_id,
     },
     mutation_result::{ambiguous_mutation_result, mutation_error_without_blind_retry},
+    server::MetaAdsServer,
 };
 
 const MAX_HASH_CHARS: usize = 128;
@@ -30,6 +37,149 @@ const MAX_DESCRIPTION_CHARS: usize = 5_000;
 const MAX_LOCAL_IMAGE_BYTES: u64 = 15 * 1024 * 1024;
 const MAX_LOCAL_VIDEO_BYTES: u64 = 512 * 1024 * 1024;
 const MEDIA_HEADER_BYTES: usize = 16;
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct UploadPageAdMediaInput {
+    pub page_id: String,
+    pub media_kind: PageAdMediaKind,
+    pub source: PageAdMediaSource,
+    /// Photo caption or video description; does not publish a Page feed post.
+    #[schemars(length(min = 1, max = 2048))]
+    pub text: Option<String>,
+    /// Videos only.
+    #[schemars(length(min = 1, max = 255))]
+    pub title: Option<String>,
+    /// Photos only.
+    #[schemars(length(min = 1, max = 2048))]
+    pub alt_text: Option<String>,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum PageAdMediaKind {
+    Photo,
+    Video,
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum PageAdMediaSource {
+    /// JPEG/PNG up to 15 MiB, or MP4/MOV up to 512 MiB, under META_MEDIA_ROOT.
+    LocalFile {
+        #[schemars(length(min = 1, max = 1024))]
+        relative_path: String,
+    },
+    /// Meta downloads this credential-free public HTTPS URL.
+    HttpsUrl {
+        #[schemars(length(min = 1, max = 8192))]
+        url: String,
+    },
+}
+
+fn page_media_request(
+    input: &UploadPageAdMediaInput,
+) -> Result<(String, Vec<(String, String)>), PublicError> {
+    let page = graph_tools::id(&input.page_id, "page_id")?;
+    let mut params = vec![("published".into(), "false".into())];
+    let (edge, url_key, text_key) = match input.media_kind {
+        PageAdMediaKind::Photo => {
+            if input.title.is_some() {
+                return Err(PublicError::invalid_input(
+                    "title applies only to videos",
+                    "Use text for a photo caption",
+                ));
+            }
+            ("photos", "url", "caption")
+        }
+        PageAdMediaKind::Video => {
+            if input.alt_text.is_some() {
+                return Err(PublicError::invalid_input(
+                    "alt_text applies only to photos",
+                    "Use text for a video description",
+                ));
+            }
+            ("videos", "file_url", "description")
+        }
+    };
+    for (key, value, limit) in [
+        (text_key, &input.text, 2048),
+        ("title", &input.title, 255),
+        ("alt_text_custom", &input.alt_text, 2048),
+    ] {
+        if let Some(value) = value {
+            params.push((key.into(), graph_tools::text(value, key, limit)?));
+        }
+    }
+    if let PageAdMediaSource::HttpsUrl { url } = &input.source {
+        params.push((url_key.into(), normalize_remote_video_url(url)?));
+    }
+    Ok((format!("{page}/{edge}"), params))
+}
+
+#[tool_router(router = page_media_router, vis = "pub(crate)")]
+impl MetaAdsServer {
+    #[tool(
+        name = "upload_page_ad_media",
+        description = "Upload unpublished Page photos or videos for ads and Instant Experiences. Returns Page media IDs, unlike account image hashes. Requires Page post permissions; local files stay within META_MEDIA_ROOT.",
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn upload_page_ad_media(
+        &self,
+        Parameters(input): Parameters<UploadPageAdMediaInput>,
+    ) -> Result<Json<ToolResponse<GraphData>>, Json<ToolResponse<GraphData>>> {
+        let (endpoint, params) = match page_media_request(&input) {
+            Ok(request) => request,
+            Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),
+        };
+        let local = if let PageAdMediaSource::LocalFile { relative_path } = &input.source {
+            let (kind, limit) = match input.media_kind {
+                PageAdMediaKind::Photo => (LocalMediaKind::Image, MAX_LOCAL_IMAGE_BYTES),
+                PageAdMediaKind::Video => (LocalMediaKind::Video, MAX_LOCAL_VIDEO_BYTES),
+            };
+            match open_local_media(self.media_root.as_deref(), relative_path, kind, limit).await {
+                Ok(file) => Some(file),
+                Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),
+            }
+        } else {
+            None
+        };
+        let graph = match self.graph.for_page(&input.page_id).await {
+            Ok(graph) => graph,
+            Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),
+        };
+        let response = if let Some(file) = local {
+            graph_tools::response(
+                graph
+                    .post_multipart_file_json(
+                        &endpoint,
+                        "source",
+                        file.file,
+                        file.size,
+                        file.file_name.into(),
+                        file.mime_type,
+                        params,
+                    )
+                    .await
+                    .map_err(|error| {
+                        mutation_error_without_blind_retry(
+                            error,
+                            "Read Page photos or videos before uploading again",
+                        )
+                    })
+                    .and_then(graph_tools::normalize_write),
+            )
+        } else {
+            graph_tools::write(&graph, &endpoint, params).await
+        };
+        response.into_mcp_result()
+    }
+}
 
 /// Add one image to an ad account. Local files are relative to the configured
 /// `META_MEDIA_ROOT`; cross-account copies require access to both accounts.
@@ -116,17 +266,29 @@ struct MutationRequest {
     form: Vec<(String, String)>,
 }
 
-struct OpenedMedia {
-    file: tokio::fs::File,
-    size: u64,
-    file_name: &'static str,
-    mime_type: &'static str,
+pub(crate) struct OpenedMedia {
+    pub file: tokio::fs::File,
+    pub size: u64,
+    pub file_name: &'static str,
+    pub mime_type: &'static str,
 }
 
 #[derive(Clone, Copy)]
-enum LocalMediaKind {
+pub(crate) enum LocalMediaKind {
     Image,
     Video,
+    LeadDocument,
+    CatalogFeed(CatalogFeedFormat),
+    PlayableArchive,
+}
+
+#[derive(Clone, Copy, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum CatalogFeedFormat {
+    Csv,
+    Tsv,
+    Xml,
+    Json,
 }
 
 #[derive(Clone, Copy)]
@@ -370,7 +532,7 @@ fn push_optional_text(
     Ok(())
 }
 
-async fn open_local_media(
+pub(crate) async fn open_local_media(
     media_root: Option<&Path>,
     relative_path: &str,
     kind: LocalMediaKind,
@@ -493,6 +655,50 @@ fn detect_media(kind: LocalMediaKind, header: &[u8]) -> Option<DetectedMedia> {
     match kind {
         LocalMediaKind::Image => detect_image(header),
         LocalMediaKind::Video => detect_video(header),
+        LocalMediaKind::LeadDocument => {
+            if header.starts_with(b"%PDF-") {
+                Some(DetectedMedia {
+                    file_name: "document.pdf",
+                    mime_type: "application/pdf",
+                })
+            } else {
+                detect_image(header)
+            }
+        }
+        LocalMediaKind::CatalogFeed(format) => {
+            let valid_text = !header
+                .iter()
+                .any(|byte| byte.is_ascii_control() && !matches!(byte, b'\t' | b'\r' | b'\n'))
+                && std::str::from_utf8(header)
+                    .err()
+                    .is_none_or(|error| error.error_len().is_none());
+            let prefix = String::from_utf8_lossy(header);
+            let prefix = prefix.trim_start_matches('\u{feff}').trim_start();
+            let valid_start = match format {
+                CatalogFeedFormat::Xml => prefix.starts_with('<'),
+                CatalogFeedFormat::Json => prefix.starts_with(['{', '[']),
+                _ => true,
+            };
+            if !valid_text || !valid_start {
+                return None;
+            }
+            let (file_name, mime_type) = match format {
+                CatalogFeedFormat::Csv => ("feed.csv", "text/csv"),
+                CatalogFeedFormat::Tsv => ("feed.tsv", "text/tab-separated-values"),
+                CatalogFeedFormat::Xml => ("feed.xml", "application/xml"),
+                CatalogFeedFormat::Json => ("feed.json", "application/json"),
+            };
+            Some(DetectedMedia {
+                file_name,
+                mime_type,
+            })
+        }
+        LocalMediaKind::PlayableArchive => {
+            header.starts_with(b"PK\x03\x04").then_some(DetectedMedia {
+                file_name: "playable.zip",
+                mime_type: "application/zip",
+            })
+        }
     }
 }
 
@@ -530,7 +736,7 @@ fn detect_video(header: &[u8]) -> Option<DetectedMedia> {
     })
 }
 
-fn normalize_remote_video_url(raw: &str) -> Result<String, PublicError> {
+pub(crate) fn normalize_remote_video_url(raw: &str) -> Result<String, PublicError> {
     let raw = raw.trim();
     if raw.is_empty() || raw.chars().count() > MAX_SOURCE_URL_CHARS {
         return Err(unsafe_video_url());
@@ -540,6 +746,7 @@ fn normalize_remote_video_url(raw: &str) -> Result<String, PublicError> {
     if url.scheme() != "https"
         || !url.username().is_empty()
         || url.password().is_some()
+        || crate::bounded_json::credential_value(raw)
         || url.fragment().is_some()
         || url.port().is_some_and(|port| port != 443)
         || domain.eq_ignore_ascii_case("localhost")
@@ -593,6 +800,9 @@ fn media_label(kind: LocalMediaKind) -> &'static str {
     match kind {
         LocalMediaKind::Image => "image",
         LocalMediaKind::Video => "video",
+        LocalMediaKind::LeadDocument => "document",
+        LocalMediaKind::CatalogFeed(_) => "catalog feed",
+        LocalMediaKind::PlayableArchive => "playable archive",
     }
 }
 
@@ -602,6 +812,15 @@ fn larger_media_action(kind: LocalMediaKind) -> String {
         LocalMediaKind::Video => {
             "Choose a nonempty video no larger than 512 MiB or use an HTTPS URL".to_owned()
         }
+        LocalMediaKind::LeadDocument => {
+            "Choose a nonempty document no larger than 20 MiB".to_owned()
+        }
+        LocalMediaKind::CatalogFeed(_) => {
+            "Choose a nonempty feed under the tool's local upload size limit".to_owned()
+        }
+        LocalMediaKind::PlayableArchive => {
+            "Choose a nonempty ZIP archive under the tool's local upload size limit".to_owned()
+        }
     }
 }
 
@@ -609,6 +828,13 @@ fn supported_media_action(kind: LocalMediaKind) -> String {
     match kind {
         LocalMediaKind::Image => "Use a JPEG or PNG image".to_owned(),
         LocalMediaKind::Video => "Use an MP4 or MOV video, or provide an HTTPS URL".to_owned(),
+        LocalMediaKind::LeadDocument => "Use a PDF, JPEG or PNG document".to_owned(),
+        LocalMediaKind::CatalogFeed(_) => {
+            "Use a UTF-8 CSV, TSV, XML or JSON feed matching the selected format".to_owned()
+        }
+        LocalMediaKind::PlayableArchive => {
+            "Use a ZIP archive containing the playable asset".to_owned()
+        }
     }
 }
 
@@ -629,6 +855,7 @@ fn unsafe_video_url() -> PublicError {
 fn remote_video_error(error: GraphError) -> PublicError {
     match error {
         GraphError::NotAuthenticated
+        | GraphError::PageAccessRequired
         | GraphError::InvalidEndpoint
         | GraphError::InvalidQuery
         | GraphError::ResponseTooLarge { .. }
@@ -673,6 +900,48 @@ mod tests {
     };
 
     #[test]
+    fn new_page_uploads_are_unpublished_and_feed_files_match_the_selected_format() {
+        let input: super::UploadPageAdMediaInput = serde_json::from_value(serde_json::json!({
+            "page_id":"42", "media_kind":"photo", "source":{"kind":"https_url","url":"https://cdn.example.test/photo.jpg"}, "text":"A photo"
+        })).unwrap();
+        let (path, params) = super::page_media_request(&input).unwrap();
+        assert_eq!(path, "42/photos");
+        assert!(params.contains(&("published".into(), "false".into())));
+        assert!(params.contains(&("caption".into(), "A photo".into())));
+        assert!(
+            super::detect_media(
+                super::LocalMediaKind::CatalogFeed(super::CatalogFeedFormat::Csv),
+                b"id,title\n1,item"
+            )
+            .is_some()
+        );
+        assert!(
+            super::detect_media(
+                super::LocalMediaKind::CatalogFeed(super::CatalogFeedFormat::Xml),
+                b"<rss><channel>"
+            )
+            .is_some()
+        );
+        assert!(
+            super::detect_media(
+                super::LocalMediaKind::CatalogFeed(super::CatalogFeedFormat::Json),
+                b"not json"
+            )
+            .is_none()
+        );
+        assert!(
+            super::detect_media(
+                super::LocalMediaKind::CatalogFeed(super::CatalogFeedFormat::Csv),
+                b"binary\0data"
+            )
+            .is_none()
+        );
+        assert!(
+            super::detect_media(super::LocalMediaKind::PlayableArchive, b"PK\x03\x04").is_some()
+        );
+    }
+
+    #[test]
     fn builds_exact_cross_account_image_copy() {
         let request = build_image_copy_request("act_456", "act_123", "abc_123-def").unwrap();
         assert_eq!(request.endpoint, "act_456/adimages");
@@ -687,6 +956,14 @@ mod tests {
 
     #[test]
     fn builds_bounded_https_video_request() {
+        for key in ["access_token", "api_key", "token", "provider_secret"] {
+            assert!(
+                super::normalize_remote_video_url(&format!(
+                    "https://cdn.example/video.mp4?{key}=private"
+                ))
+                .is_err()
+            );
+        }
         let metadata =
             video_metadata_form(Some(" Promo ".to_owned()), Some("Launch".to_owned()), None)
                 .unwrap();

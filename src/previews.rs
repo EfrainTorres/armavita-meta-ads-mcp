@@ -1,11 +1,18 @@
-use rmcp::schemars::{self, JsonSchema};
+use rmcp::{
+    Json,
+    handler::server::wrapper::Parameters,
+    schemars::{self, JsonSchema},
+    tool, tool_router,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 
 use crate::{
     error::{PublicError, ToolResponse},
     graph::GraphClient,
+    graph_tools,
     meta_ids::numeric_owned as normalize_numeric_id,
+    server::MetaAdsServer,
 };
 
 const MAX_LOCALE_CHARS: usize = 32;
@@ -28,35 +35,272 @@ pub struct ListAdPreviewsInput {
     pub height: Option<u16>,
 }
 
-/// A compact, intentionally curated subset of Meta v26's large preview-format enum.
+#[derive(Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GenerateCreativePreviewsInput {
+    pub ad_account_id: String,
+    /// Existing creative as {"id":"..."}, or the bounded v26 creative specification to preview.
+    pub creative: Map<String, Value>,
+    pub ad_format: AdPreviewFormat,
+    /// Optional v26 preview parameters: locale, dimensions, product IDs, dynamic specs and render options.
+    pub options: Option<Map<String, Value>>,
+}
+
+#[tool_router(router = creative_previews_router, vis = "pub(crate)")]
+impl MetaAdsServer {
+    #[tool(
+        name = "generate_creative_previews",
+        description = "Preview an existing creative or a draft specification before creating an ad. Supports Facebook, Instagram and Threads formats; creates no ad.",
+        annotations(read_only_hint = true, open_world_hint = true)
+    )]
+    async fn generate_creative_previews(
+        &self,
+        Parameters(input): Parameters<GenerateCreativePreviewsInput>,
+    ) -> Result<Json<ToolResponse<AdPreviewList>>, Json<ToolResponse<AdPreviewList>>> {
+        let prepared = build_creative_preview_request(&input);
+        let response = match prepared {
+            Ok((endpoint, params)) => match self.graph.get_json(&endpoint, &params).await {
+                Ok(payload) => {
+                    graph_tools::response(normalize_page(payload, input.ad_format, false))
+                }
+                Err(error) => ToolResponse::error(error),
+            },
+            Err(error) => ToolResponse::error(error),
+        };
+        response.into_mcp_result()
+    }
+}
+
+fn build_creative_preview_request(
+    input: &GenerateCreativePreviewsInput,
+) -> Result<(String, graph_tools::Params), PublicError> {
+    let account = graph_tools::account(&input.ad_account_id)?;
+    if input.creative.is_empty() {
+        return Err(PublicError::invalid_input(
+            "creative cannot be empty",
+            "Provide an existing creative ID or a draft specification",
+        ));
+    }
+    let mut params = vec![("ad_format".into(), input.ad_format.as_graph_value().into())];
+    let endpoint = if let Some(id) = input.creative.get("id") {
+        if input.creative.len() != 1
+            || !id.is_string()
+            || input
+                .options
+                .as_ref()
+                .is_some_and(|options| options.contains_key("message"))
+        {
+            return Err(PublicError::invalid_input(
+                "Existing creative previews accept only its ID and preview options",
+                "Use {\"id\":\"CREATIVE_ID\"} without draft fields or message",
+            ));
+        }
+        format!(
+            "{}/previews",
+            graph_tools::id(id.as_str().unwrap_or_default(), "creative.id")?
+        )
+    } else {
+        params.push((
+            "creative".into(),
+            graph_tools::json(&Value::Object(input.creative.clone()), "creative")?,
+        ));
+        format!("{account}/generatepreviews")
+    };
+    if let Some(options) = &input.options {
+        for field in ["width", "height"] {
+            if let Some(value) = options.get(field)
+                && value.as_u64().is_none_or(|v| !(1..=4096).contains(&v))
+            {
+                return Err(PublicError::invalid_input(
+                    "Preview dimensions must be 1–4096 pixels",
+                    "Use numeric width and height",
+                ));
+            }
+        }
+        params.extend(graph_tools::form_fields(
+            options,
+            &[
+                "creative_feature",
+                "dynamic_asset_label",
+                "dynamic_creative_spec",
+                "dynamic_customization",
+                "end_date",
+                "height",
+                "locale",
+                "message",
+                "place_page_id",
+                "post",
+                "product_item_ids",
+                "render_type",
+                "start_date",
+                "width",
+            ],
+        )?);
+    }
+    Ok((endpoint, params))
+}
+
+/// Meta v26 preview formats. Availability depends on the creative and placement.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum AdPreviewFormat {
-    DesktopFeedStandard,
-    MobileFeedStandard,
-    InstagramStandard,
-    FacebookStoryMobile,
-    InstagramStory,
-    FacebookReelsMobile,
-    InstagramReels,
-    RightColumnStandard,
-    MarketplaceMobile,
+    AudienceNetworkInstreamVideo,
+    AudienceNetworkInstreamVideoMobile,
+    AudienceNetworkOutstreamVideo,
     AudienceNetworkRewardedVideo,
+    BizDiscoFeedMobile,
+    DesktopFeedStandard,
+    FacebookIfuReelsMobile,
+    FacebookProfileFeedDesktop,
+    FacebookProfileFeedMobile,
+    FacebookProfileReelsMobile,
+    FacebookReelsBanner,
+    FacebookReelsBannerDesktop,
+    FacebookReelsBannerFeedAndroid,
+    FacebookReelsBannerFeedAndroidLarge,
+    FacebookReelsBannerFullscreenIos,
+    FacebookReelsBannerFullscreenMobile,
+    FacebookReelsMobile,
+    FacebookReelsPostloop,
+    FacebookReelsPostloopFeed,
+    FacebookReelsSimilarProductsMobile,
+    FacebookReelsSticker,
+    FacebookStoryMobile,
+    FacebookStoryStickerMobile,
+    InstagramExploreContextual,
+    InstagramExploreGridHome,
+    InstagramExploreImmersive,
+    InstagramFeedWeb,
+    InstagramFeedWebMSite,
+    InstagramLeadGenMultiSubmitAds,
+    InstagramProfileFeed,
+    InstagramProfileReels,
+    InstagramReels,
+    InstagramReelsOverlay,
+    InstagramReelsWeb,
+    InstagramReelsWebMSite,
+    InstagramSearchChain,
+    InstagramSearchGrid,
+    InstagramStandard,
+    InstagramStory,
+    InstagramStoryEffectTray,
+    InstagramStoryWeb,
+    InstagramStoryWebMSite,
+    InstantArticleRecirculationAd,
+    InstantArticleStandard,
+    InstreamBannerDesktop,
+    InstreamBannerFeedIos,
+    InstreamBannerFullscreenIos,
+    InstreamBannerFullscreenMobile,
+    InstreamBannerImmersiveMobile,
+    InstreamBannerMobile,
+    InstreamVideoDesktop,
+    InstreamVideoFullscreenIos,
+    InstreamVideoFullscreenMobile,
+    InstreamVideoImage,
+    InstreamVideoImmersiveMobile,
+    InstreamVideoMobile,
+    JobBrowserDesktop,
+    JobBrowserMobile,
+    MarketplaceMobile,
+    MessengerMobileInboxMedia,
+    MessengerMobileStoryMedia,
+    MobileBanner,
+    MobileFeedBasic,
+    MobileFeedStandard,
+    MobileFullwidth,
+    MobileInterstitial,
+    MobileMediumRectangle,
+    MobileNative,
+    RightColumnStandard,
+    SuggestedVideoDesktop,
+    SuggestedVideoFullscreenMobile,
+    SuggestedVideoImmersiveMobile,
+    SuggestedVideoMobile,
+    WatchFeedHome,
+    WatchFeedMobile,
+    ThreadsStream,
 }
 
 impl AdPreviewFormat {
     const fn as_graph_value(self) -> &'static str {
         match self {
-            Self::DesktopFeedStandard => "DESKTOP_FEED_STANDARD",
-            Self::MobileFeedStandard => "MOBILE_FEED_STANDARD",
-            Self::InstagramStandard => "INSTAGRAM_STANDARD",
-            Self::FacebookStoryMobile => "FACEBOOK_STORY_MOBILE",
-            Self::InstagramStory => "INSTAGRAM_STORY",
-            Self::FacebookReelsMobile => "FACEBOOK_REELS_MOBILE",
-            Self::InstagramReels => "INSTAGRAM_REELS",
-            Self::RightColumnStandard => "RIGHT_COLUMN_STANDARD",
-            Self::MarketplaceMobile => "MARKETPLACE_MOBILE",
+            Self::AudienceNetworkInstreamVideo => "AUDIENCE_NETWORK_INSTREAM_VIDEO",
+            Self::AudienceNetworkInstreamVideoMobile => "AUDIENCE_NETWORK_INSTREAM_VIDEO_MOBILE",
+            Self::AudienceNetworkOutstreamVideo => "AUDIENCE_NETWORK_OUTSTREAM_VIDEO",
             Self::AudienceNetworkRewardedVideo => "AUDIENCE_NETWORK_REWARDED_VIDEO",
+            Self::BizDiscoFeedMobile => "BIZ_DISCO_FEED_MOBILE",
+            Self::DesktopFeedStandard => "DESKTOP_FEED_STANDARD",
+            Self::FacebookIfuReelsMobile => "FACEBOOK_IFU_REELS_MOBILE",
+            Self::FacebookProfileFeedDesktop => "FACEBOOK_PROFILE_FEED_DESKTOP",
+            Self::FacebookProfileFeedMobile => "FACEBOOK_PROFILE_FEED_MOBILE",
+            Self::FacebookProfileReelsMobile => "FACEBOOK_PROFILE_REELS_MOBILE",
+            Self::FacebookReelsBanner => "FACEBOOK_REELS_BANNER",
+            Self::FacebookReelsBannerDesktop => "FACEBOOK_REELS_BANNER_DESKTOP",
+            Self::FacebookReelsBannerFeedAndroid => "FACEBOOK_REELS_BANNER_FEED_ANDROID",
+            Self::FacebookReelsBannerFeedAndroidLarge => "FACEBOOK_REELS_BANNER_FEED_ANDROID_LARGE",
+            Self::FacebookReelsBannerFullscreenIos => "FACEBOOK_REELS_BANNER_FULLSCREEN_IOS",
+            Self::FacebookReelsBannerFullscreenMobile => "FACEBOOK_REELS_BANNER_FULLSCREEN_MOBILE",
+            Self::FacebookReelsMobile => "FACEBOOK_REELS_MOBILE",
+            Self::FacebookReelsPostloop => "FACEBOOK_REELS_POSTLOOP",
+            Self::FacebookReelsPostloopFeed => "FACEBOOK_REELS_POSTLOOP_FEED",
+            Self::FacebookReelsSimilarProductsMobile => "FACEBOOK_REELS_SIMILAR_PRODUCTS_MOBILE",
+            Self::FacebookReelsSticker => "FACEBOOK_REELS_STICKER",
+            Self::FacebookStoryMobile => "FACEBOOK_STORY_MOBILE",
+            Self::FacebookStoryStickerMobile => "FACEBOOK_STORY_STICKER_MOBILE",
+            Self::InstagramExploreContextual => "INSTAGRAM_EXPLORE_CONTEXTUAL",
+            Self::InstagramExploreGridHome => "INSTAGRAM_EXPLORE_GRID_HOME",
+            Self::InstagramExploreImmersive => "INSTAGRAM_EXPLORE_IMMERSIVE",
+            Self::InstagramFeedWeb => "INSTAGRAM_FEED_WEB",
+            Self::InstagramFeedWebMSite => "INSTAGRAM_FEED_WEB_M_SITE",
+            Self::InstagramLeadGenMultiSubmitAds => "INSTAGRAM_LEAD_GEN_MULTI_SUBMIT_ADS",
+            Self::InstagramProfileFeed => "INSTAGRAM_PROFILE_FEED",
+            Self::InstagramProfileReels => "INSTAGRAM_PROFILE_REELS",
+            Self::InstagramReels => "INSTAGRAM_REELS",
+            Self::InstagramReelsOverlay => "INSTAGRAM_REELS_OVERLAY",
+            Self::InstagramReelsWeb => "INSTAGRAM_REELS_WEB",
+            Self::InstagramReelsWebMSite => "INSTAGRAM_REELS_WEB_M_SITE",
+            Self::InstagramSearchChain => "INSTAGRAM_SEARCH_CHAIN",
+            Self::InstagramSearchGrid => "INSTAGRAM_SEARCH_GRID",
+            Self::InstagramStandard => "INSTAGRAM_STANDARD",
+            Self::InstagramStory => "INSTAGRAM_STORY",
+            Self::InstagramStoryEffectTray => "INSTAGRAM_STORY_EFFECT_TRAY",
+            Self::InstagramStoryWeb => "INSTAGRAM_STORY_WEB",
+            Self::InstagramStoryWebMSite => "INSTAGRAM_STORY_WEB_M_SITE",
+            Self::InstantArticleRecirculationAd => "INSTANT_ARTICLE_RECIRCULATION_AD",
+            Self::InstantArticleStandard => "INSTANT_ARTICLE_STANDARD",
+            Self::InstreamBannerDesktop => "INSTREAM_BANNER_DESKTOP",
+            Self::InstreamBannerFeedIos => "INSTREAM_BANNER_FEED_IOS",
+            Self::InstreamBannerFullscreenIos => "INSTREAM_BANNER_FULLSCREEN_IOS",
+            Self::InstreamBannerFullscreenMobile => "INSTREAM_BANNER_FULLSCREEN_MOBILE",
+            Self::InstreamBannerImmersiveMobile => "INSTREAM_BANNER_IMMERSIVE_MOBILE",
+            Self::InstreamBannerMobile => "INSTREAM_BANNER_MOBILE",
+            Self::InstreamVideoDesktop => "INSTREAM_VIDEO_DESKTOP",
+            Self::InstreamVideoFullscreenIos => "INSTREAM_VIDEO_FULLSCREEN_IOS",
+            Self::InstreamVideoFullscreenMobile => "INSTREAM_VIDEO_FULLSCREEN_MOBILE",
+            Self::InstreamVideoImage => "INSTREAM_VIDEO_IMAGE",
+            Self::InstreamVideoImmersiveMobile => "INSTREAM_VIDEO_IMMERSIVE_MOBILE",
+            Self::InstreamVideoMobile => "INSTREAM_VIDEO_MOBILE",
+            Self::JobBrowserDesktop => "JOB_BROWSER_DESKTOP",
+            Self::JobBrowserMobile => "JOB_BROWSER_MOBILE",
+            Self::MarketplaceMobile => "MARKETPLACE_MOBILE",
+            Self::MessengerMobileInboxMedia => "MESSENGER_MOBILE_INBOX_MEDIA",
+            Self::MessengerMobileStoryMedia => "MESSENGER_MOBILE_STORY_MEDIA",
+            Self::MobileBanner => "MOBILE_BANNER",
+            Self::MobileFeedBasic => "MOBILE_FEED_BASIC",
+            Self::MobileFeedStandard => "MOBILE_FEED_STANDARD",
+            Self::MobileFullwidth => "MOBILE_FULLWIDTH",
+            Self::MobileInterstitial => "MOBILE_INTERSTITIAL",
+            Self::MobileMediumRectangle => "MOBILE_MEDIUM_RECTANGLE",
+            Self::MobileNative => "MOBILE_NATIVE",
+            Self::RightColumnStandard => "RIGHT_COLUMN_STANDARD",
+            Self::SuggestedVideoDesktop => "SUGGESTED_VIDEO_DESKTOP",
+            Self::SuggestedVideoFullscreenMobile => "SUGGESTED_VIDEO_FULLSCREEN_MOBILE",
+            Self::SuggestedVideoImmersiveMobile => "SUGGESTED_VIDEO_IMMERSIVE_MOBILE",
+            Self::SuggestedVideoMobile => "SUGGESTED_VIDEO_MOBILE",
+            Self::WatchFeedHome => "WATCH_FEED_HOME",
+            Self::WatchFeedMobile => "WATCH_FEED_MOBILE",
+            Self::ThreadsStream => "THREADS_STREAM",
         }
     }
 }
@@ -253,6 +497,25 @@ mod tests {
             width: Some(1080),
             height: Some(1080),
         }
+    }
+
+    #[test]
+    fn drafts_and_existing_creatives_use_exact_threads_preview_contracts() {
+        let mut input: super::GenerateCreativePreviewsInput = serde_json::from_value(json!({
+            "ad_account_id":"123", "creative":{"object_story_spec":{"page_id":"42","link_data":{"message":"A new ad"}}}, "ad_format":"threads_stream"
+        })).unwrap();
+        let (path, params) = super::build_creative_preview_request(&input).unwrap();
+        assert_eq!(path, "act_123/generatepreviews");
+        assert!(params.contains(&("ad_format".into(), "THREADS_STREAM".into())));
+        input.creative = serde_json::from_value(json!({"id":"555"})).unwrap();
+        assert_eq!(
+            super::build_creative_preview_request(&input).unwrap().0,
+            "555/previews"
+        );
+        input.creative =
+            serde_json::from_value(json!({"object_story_spec":{"access_token":"private"}}))
+                .unwrap();
+        assert!(super::build_creative_preview_request(&input).is_err());
     }
 
     #[test]

@@ -40,8 +40,19 @@ The default login requests `ads_management`, `ads_read`, `business_management`, 
 
 Catalogs also need `catalog_management`. Partnership permission writes need
 `instagram_branded_content_ads_brand` and the appropriate ADVERTISER asset role.
+Other workflows may need these additional permissions:
+
+| Workflow | Permissions |
+| --- | --- |
+| Instant Forms and submissions | `pages_manage_ads`, `leads_retrieval`, and Page lead access |
+| Lead webhook subscriptions | `pages_manage_metadata` |
+| Page media uploads and form cover photos | `pages_manage_posts` |
+| Facebook ad comments | `pages_read_user_content`, `pages_manage_engagement` |
+| Instagram ad comments | `instagram_manage_comments` |
+
 To add scopes, set `META_AUTH_SCOPE` to the **full** desired list—it replaces the defaults.
 Your token must also have access to the accounts and assets you request.
+Page tokens are resolved internally and never returned to your assistant.
 
 ## Client configuration
 
@@ -74,5 +85,22 @@ that folder. Uploads stay disabled if this setting is absent.
 - JPEG/PNG images: up to 15 MiB.
 - MP4/MOV videos: up to 512 MiB.
 - Larger videos: use a public HTTPS `file_url` without credentials, which Meta downloads.
+- Lead form documents: PDF/JPEG/PNG up to 20 MiB.
+- Catalog feeds: UTF-8 CSV/TSV/XML/JSON up to 64 MiB.
+- Playable archives: ZIP up to 5 MiB.
+
+Use Page media uploads when an Instant Experience needs a photo or video ID. Account image hashes
+are different assets. Page uploads remain unpublished.
+
+## A few Meta limits
+
+- Instant Form content cannot be edited after creation. Create a replacement form, or archive the old one.
+- Lead webhooks need an existing app callback; this local server does not host a public webhook.
+- Threads placements require Instagram Feed alongside them. Keep captions within 1,000 characters
+  and source images at least 500 pixels wide.
+- Threads reply tools support direct text replies and hide/unhide on eligible ads. They require the
+  Threads media ID; nested replies and reply deletion are not available through this ad API.
+- Edit Instant Experiences before publishing. To retire a published experience, hide it.
+- Saved audiences are available for lookup; creation and editing are not exposed by the current API.
 
 Keep write approvals enabled and read the [security guidance](../SECURITY.md) before changing live ads.

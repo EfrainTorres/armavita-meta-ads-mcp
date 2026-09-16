@@ -17,6 +17,8 @@ pub enum StartupError {
 pub(crate) enum GraphError {
     #[error("Meta authentication is not configured")]
     NotAuthenticated,
+    #[error("Meta did not provide Page authorization")]
+    PageAccessRequired,
     #[error("invalid Graph API endpoint")]
     InvalidEndpoint,
     #[error("invalid Graph API query")]
@@ -73,6 +75,12 @@ impl From<GraphError> for PublicError {
                 message: "Meta authentication is not configured".to_owned(),
                 retryable: false,
                 action: Some("Set META_ACCESS_TOKEN or complete the OAuth login flow".to_owned()),
+            },
+            GraphError::PageAccessRequired => Self {
+                code: "PAGE_ACCESS_REQUIRED".to_owned(),
+                message: "Meta did not provide a usable Page access token".to_owned(),
+                retryable: false,
+                action: Some("Grant the app the required Page permissions and asset tasks, then refresh the server login".to_owned()),
             },
             GraphError::InvalidEndpoint => Self {
                 code: "INVALID_INPUT".to_owned(),

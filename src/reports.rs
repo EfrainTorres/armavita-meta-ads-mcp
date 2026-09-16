@@ -190,6 +190,7 @@ async fn fetch_snapshot(
             action_breakdowns: None,
             summary_action_breakdowns: None,
             action_attribution_windows: None,
+            options: None,
             page_size: Some(1),
             page_cursor: None,
         },

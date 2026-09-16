@@ -8,7 +8,7 @@ use std::{
 };
 
 use reqwest::{
-    StatusCode, Url,
+    Method, StatusCode, Url,
     header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderValue, RETRY_AFTER},
     multipart::{Form, Part},
     redirect::Policy,
@@ -35,7 +35,7 @@ const MAX_MUTATION_PAIRS: usize = 64;
 const MAX_MUTATION_BODY_BYTES: usize = 128 * 1024;
 const MAX_UPLOAD_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_UPLOAD_FILE_NAME_BYTES: usize = 255;
-const MAX_UPLOAD_TEXT_PAIRS: usize = 16;
+const MAX_UPLOAD_TEXT_PAIRS: usize = 64;
 const MAX_UPLOAD_TEXT_BYTES: usize = 16 * 1024;
 const MEDIA_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const MEDIA_ACCEPT: &str = "image/jpeg,image/png,image/webp,image/gif";
@@ -55,6 +55,16 @@ pub(crate) struct GraphClient {
     api_base: String,
     authenticated: Arc<AtomicBool>,
     cache_backed: bool,
+    // Page-scoped clones reuse the pool and keep credentials out of results/Debug.
+    authorization: Option<HeaderValue>,
+}
+
+pub(crate) struct UploadFile {
+    pub field: &'static str,
+    pub file: tokio::fs::File,
+    pub size: u64,
+    pub name: String,
+    pub mime: &'static str,
 }
 
 impl fmt::Debug for GraphClient {
@@ -112,6 +122,7 @@ impl GraphClient {
             api_base: config.api_base.trim_end_matches('/').to_owned(),
             authenticated: Arc::new(AtomicBool::new(config.access_token.is_some())),
             cache_backed: config.token_origin == Some(TokenOrigin::Cache),
+            authorization: None,
         })
     }
 
@@ -131,13 +142,58 @@ impl GraphClient {
         }
 
         let url = format!("{}/{}", self.api_base, endpoint.trim_matches('/'));
-        tokio::time::timeout(TOTAL_GET_TIMEOUT, self.get_json_with_retries(&url, query))
-            .await
-            .unwrap_or_else(|_| {
-                Err(GraphError::Transport {
-                    message: "Meta request timed out".to_owned(),
-                })
+        tokio::time::timeout(
+            TOTAL_GET_TIMEOUT,
+            self.get_json_with_retries(&url, query, false),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(GraphError::Transport {
+                message: "Meta request timed out".to_owned(),
             })
+        })
+    }
+
+    /// Resolve a Page token internally; never expose it through a tool response.
+    /// Clones share the HTTP pool, but a revoked Page token cannot invalidate the user's token.
+    pub(crate) async fn for_page(&self, page_id: &str) -> Result<Self, GraphError> {
+        let page_id = crate::meta_ids::numeric(page_id).ok_or(GraphError::InvalidEndpoint)?;
+        self.ensure_mutation_input(page_id)?;
+        let url = format!("{}/{}", self.api_base, page_id);
+        let query = [("fields".to_owned(), "access_token".to_owned())];
+        let mut payload = tokio::time::timeout(
+            TOTAL_GET_TIMEOUT,
+            self.get_json_with_retries(&url, &query, true),
+        )
+        .await
+        .map_err(|_| GraphError::Transport {
+            message: "Meta Page authorization timed out".into(),
+        })??;
+        let token = payload
+            .get_mut("access_token")
+            .map(Value::take)
+            .and_then(|value| match value {
+                Value::String(token) => Some(token),
+                _ => None,
+            })
+            .filter(|token| !token.is_empty() && token.len() <= 8192)
+            .ok_or(GraphError::PageAccessRequired)?;
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|_| GraphError::PageAccessRequired)?;
+        authorization.set_sensitive(true);
+        let mut scoped = self.clone();
+        scoped.authorization = Some(authorization);
+        scoped.authenticated = Arc::new(AtomicBool::new(true));
+        scoped.cache_backed = false;
+        Ok(scoped)
+    }
+
+    fn request(&self, method: Method, url: impl AsRef<str>) -> reqwest::RequestBuilder {
+        let request = self.client.request(method, url.as_ref());
+        match &self.authorization {
+            Some(authorization) => request.header(AUTHORIZATION, authorization.clone()),
+            None => request,
+        }
     }
 
     /// Submit one bounded, form-encoded Graph mutation.
@@ -155,8 +211,7 @@ impl GraphClient {
 
         tokio::time::timeout(TOTAL_MUTATION_TIMEOUT, async {
             let response = self
-                .client
-                .post(url)
+                .request(Method::POST, url)
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(body)
                 .send()
@@ -190,8 +245,7 @@ impl GraphClient {
 
         tokio::time::timeout(TOTAL_MUTATION_TIMEOUT, async {
             let response = self
-                .client
-                .delete(url)
+                .request(Method::DELETE, url)
                 .send()
                 .await
                 .map_err(|error| public_transport_error(&error))?;
@@ -221,24 +275,69 @@ impl GraphClient {
         mime_type: &'static str,
         text_fields: Vec<(String, String)>,
     ) -> Result<Value, GraphError> {
+        self.post_multipart_files_json(
+            endpoint,
+            vec![UploadFile {
+                field: field_name,
+                file,
+                size: file_size,
+                name: file_name,
+                mime: mime_type,
+            }],
+            text_fields,
+        )
+        .await
+    }
+
+    pub(crate) async fn post_multipart_files_json(
+        &self,
+        endpoint: &str,
+        files: Vec<UploadFile>,
+        text_fields: Vec<(String, String)>,
+    ) -> Result<Value, GraphError> {
         self.ensure_mutation_input(endpoint)?;
-        if !matches!(field_name, "filename" | "source")
-            || file_size == 0
-            || file_size > MAX_UPLOAD_FILE_BYTES
-            || !valid_upload_file_name(&file_name)
-            || !valid_upload_mime_type(mime_type)
-            || !valid_upload_text_fields(&text_fields)
-        {
+        if files.is_empty() || files.len() > 2 || !valid_upload_text_fields(&text_fields) {
             return Err(GraphError::InvalidQuery);
         }
-
-        let stream = ReaderStream::new(file.take(file_size));
-        let body = reqwest::Body::wrap_stream(stream);
-        let part = Part::stream_with_length(body, file_size)
-            .file_name(file_name)
-            .mime_str(mime_type)
-            .map_err(|_| GraphError::InvalidQuery)?;
-        let mut form = Form::new().part(field_name, part);
+        let mut form = Form::new();
+        let mut seen = std::collections::BTreeSet::new();
+        let mut total = 0_u64;
+        for upload in files {
+            total = total.saturating_add(upload.size);
+            let valid_type = match upload.field {
+                "upload_gated_file" => {
+                    matches!(upload.mime, "application/pdf" | "image/jpeg" | "image/png")
+                }
+                "cover_photo" => matches!(upload.mime, "image/jpeg" | "image/png"),
+                "file" => matches!(
+                    upload.mime,
+                    "text/csv"
+                        | "text/tab-separated-values"
+                        | "application/xml"
+                        | "application/json"
+                ),
+                "source_zip" => upload.mime == "application/zip",
+                _ => valid_upload_mime_type(upload.mime),
+            };
+            if !matches!(
+                upload.field,
+                "filename" | "source" | "cover_photo" | "upload_gated_file" | "file" | "source_zip"
+            ) || !seen.insert(upload.field)
+                || upload.size == 0
+                || total > MAX_UPLOAD_FILE_BYTES
+                || !valid_upload_file_name(&upload.name)
+                || !valid_type
+            {
+                return Err(GraphError::InvalidQuery);
+            }
+            let stream = ReaderStream::new(upload.file.take(upload.size));
+            let body = reqwest::Body::wrap_stream(stream);
+            let part = Part::stream_with_length(body, upload.size)
+                .file_name(upload.name)
+                .mime_str(upload.mime)
+                .map_err(|_| GraphError::InvalidQuery)?;
+            form = form.part(upload.field, part);
+        }
         for (key, value) in text_fields {
             form = form.text(key, value);
         }
@@ -246,8 +345,7 @@ impl GraphClient {
 
         tokio::time::timeout(TOTAL_UPLOAD_TIMEOUT, async {
             let response = self
-                .client
-                .post(url)
+                .request(Method::POST, url)
                 .multipart(form)
                 .timeout(TOTAL_UPLOAD_TIMEOUT)
                 .send()
@@ -284,9 +382,10 @@ impl GraphClient {
         &self,
         url: &str,
         query: &[(String, String)],
+        preserve_page_token: bool,
     ) -> Result<Value, GraphError> {
         for attempt in 0..=MAX_RETRIES {
-            let response = match self.client.get(url).query(query).send().await {
+            let response = match self.request(Method::GET, url).query(query).send().await {
                 Ok(response) => response,
                 Err(error) => {
                     if retry_get_transport(&error, attempt).await {
@@ -303,7 +402,10 @@ impl GraphClient {
                 .and_then(|value| value.to_str().ok())
                 .and_then(|value| value.parse::<u64>().ok())
                 .map(|seconds| Duration::from_secs(seconds.min(30)));
-            let parsed = match self.parse_graph_response(response).await {
+            let parsed = match self
+                .parse_graph_response(response, preserve_page_token)
+                .await
+            {
                 Ok(parsed) => parsed,
                 Err(ResponseReadError::TooLarge) => {
                     return Err(GraphError::ResponseTooLarge {
@@ -351,26 +453,32 @@ impl GraphClient {
         &self,
         response: reqwest::Response,
     ) -> Result<Value, GraphError> {
-        let parsed = self
-            .parse_graph_response(response)
-            .await
-            .map_err(|error| match error {
-                ResponseReadError::TooLarge => GraphError::ResponseTooLarge {
-                    limit: MAX_RESPONSE_BYTES,
-                },
-                ResponseReadError::Transport(error) => public_transport_error(&error),
-            })?;
+        let parsed =
+            self.parse_graph_response(response, false)
+                .await
+                .map_err(|error| match error {
+                    ResponseReadError::TooLarge => GraphError::ResponseTooLarge {
+                        limit: MAX_RESPONSE_BYTES,
+                    },
+                    ResponseReadError::Transport(error) => public_transport_error(&error),
+                })?;
         finish_graph_response(parsed)
     }
 
     async fn parse_graph_response(
         &self,
         response: reqwest::Response,
+        preserve_page_token: bool,
     ) -> Result<ParsedGraphResponse, ResponseReadError> {
         let status = response.status();
         let body = read_bounded(response).await?;
         let mut payload = serde_json::from_slice::<Value>(&body).ok();
-        payload.iter_mut().for_each(sanitize_payload);
+        if !preserve_page_token
+            || !status.is_success()
+            || payload.as_ref().is_some_and(|v| v.get("error").is_some())
+        {
+            payload.iter_mut().for_each(sanitize_payload);
+        }
 
         let graph_code = payload
             .as_ref()
@@ -562,8 +670,26 @@ async fn read_bounded(mut response: reqwest::Response) -> Result<Vec<u8>, Respon
 }
 
 fn finish_graph_response(parsed: ParsedGraphResponse) -> Result<Value, GraphError> {
-    if parsed.status.is_success() {
-        return parsed.payload.ok_or(GraphError::InvalidJson);
+    if parsed.status.is_success()
+        && !parsed
+            .payload
+            .as_ref()
+            .is_some_and(|payload| payload.get("error").is_some_and(|error| !error.is_null()))
+    {
+        let mut payload = parsed.payload.ok_or(GraphError::InvalidJson)?;
+        // Meta retains the current page's `after` cursor on terminal pages.
+        // Every caller exposes it as next_cursor, so require an actual next page.
+        if !payload
+            .pointer("/paging/next")
+            .and_then(Value::as_str)
+            .is_some_and(|next| !next.is_empty())
+            && let Some(cursors) = payload
+                .pointer_mut("/paging/cursors")
+                .and_then(Value::as_object_mut)
+        {
+            cursors.remove("after");
+        }
+        return Ok(payload);
     }
 
     Err(GraphError::Api {
@@ -870,6 +996,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exposes_next_cursors_only_when_meta_has_a_next_page() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for body in [
+                json!({"data":[{"id":"1"}],"paging":{"cursors":{"before":"first","after":"last"}}}),
+                json!({"data":[],"paging":{"cursors":{"after":"last"},"next":""}}),
+                json!({"data":[],"paging":{"cursors":{"after":"next"},"next":"https://example.test/edge?after=next&access_token=private-token"}}),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let _request = read_http_request(&mut socket).await;
+                let body = body.to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("test-access-token-1234567890"),
+        ))
+        .unwrap();
+
+        let terminal = graph.get_json("42/edge", &[]).await.unwrap();
+        assert!(terminal.pointer("/paging/cursors/after").is_none());
+        assert_eq!(
+            terminal.pointer("/paging/cursors/before"),
+            Some(&json!("first"))
+        );
+        let empty_next = graph.get_json("42/edge", &[]).await.unwrap();
+        assert!(empty_next.pointer("/paging/cursors/after").is_none());
+        let continuing = graph.get_json("42/edge", &[]).await.unwrap();
+        assert_eq!(continuing["data"], json!([]));
+        assert_eq!(
+            continuing.pointer("/paging/cursors/after"),
+            Some(&json!("next"))
+        );
+        assert_eq!(
+            continuing.pointer("/paging/next"),
+            Some(&json!("https://example.test/edge?after=next"))
+        );
+        assert!(!continuing.to_string().contains("private-token"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn retries_get_after_a_transient_connect_failure() {
         let port_probe = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = port_probe.local_addr().unwrap();
@@ -949,6 +1123,58 @@ mod tests {
             panic!("expected a transport error");
         };
         assert_eq!(message, "Meta network request failed");
+    }
+
+    #[tokio::test]
+    async fn page_credentials_stay_private_and_revocation_does_not_invalidate_user() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (path, bearer, body) in [
+                (
+                    "/42?fields=access_token",
+                    "user-token",
+                    r#"{"access_token":"private-page-token"}"#,
+                ),
+                (
+                    "/42",
+                    "private-page-token",
+                    r#"{"error":{"code":190,"message":"expired"}}"#,
+                ),
+                (
+                    "/me",
+                    "user-token",
+                    r#"{"id":"7","access_token":"private-user-token"}"#,
+                ),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request = String::from_utf8_lossy(&request);
+                assert!(request.starts_with(&format!("GET {path} HTTP/1.1")));
+                assert!(
+                    request
+                        .to_ascii_lowercase()
+                        .contains(&format!("authorization: bearer {bearer}\r\n"))
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("user-token"),
+        ))
+        .unwrap();
+        let page = graph.for_page("42").await.unwrap();
+        assert!(!format!("{page:?}").contains("private-page-token"));
+        assert!(page.get_json("42", &[]).await.is_err());
+        let result = graph.get_json("me", &[]).await.unwrap();
+        assert!(!result.to_string().contains("private-user-token"));
+        assert_eq!(result["id"], "7");
+        server.await.unwrap();
     }
 
     #[tokio::test]

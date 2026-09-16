@@ -152,6 +152,13 @@ pub(crate) fn credential_key(key: &str) -> bool {
 
 pub(crate) fn credential_value(text: &str) -> bool {
     let lower = text.trim().to_ascii_lowercase();
+    if (lower.starts_with('{') || lower.starts_with('['))
+        && serde_json::from_str::<Value>(text)
+            .ok()
+            .is_some_and(|value| json_contains_credentials(&value))
+    {
+        return true;
+    }
     [
         "access_token=",
         "access_token\":",
@@ -181,6 +188,17 @@ pub(crate) fn credential_value(text: &str) -> bool {
                         .any(|(key, _)| credential_key(key.as_ref()))
                 })
         })
+}
+
+fn json_contains_credentials(value: &Value) -> bool {
+    match value {
+        Value::Object(fields) => fields
+            .iter()
+            .any(|(key, value)| credential_key(key) || json_contains_credentials(value)),
+        Value::Array(items) => items.iter().any(json_contains_credentials),
+        Value::String(text) => credential_value(text),
+        _ => false,
+    }
 }
 
 fn invalid_shape(field_name: &str) -> PublicError {

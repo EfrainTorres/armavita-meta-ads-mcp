@@ -64,6 +64,38 @@ pub(crate) struct VerifiedMetaNode {
     pub(crate) name: Option<String>,
 }
 
+/// Read discriminating fields before mutating a new Graph node family. Returning
+/// the same payload lets callers check ownership or draft status without another GET.
+pub(crate) async fn verify_object(
+    graph: &GraphClient,
+    object_id: &str,
+    fields: &str,
+    required_proof_fields: &[&str],
+) -> Result<Value, PublicError> {
+    let object_id = crate::graph_tools::id(object_id, "object_id")?;
+    let fields = if fields.split(',').any(|field| field == "id") {
+        fields.to_owned()
+    } else {
+        format!("id,{fields}")
+    };
+    let payload = graph
+        .get_json(&object_id, &[("fields".into(), fields)])
+        .await
+        .map_err(PublicError::from)?;
+    if required_proof_fields.is_empty()
+        || payload.get("id").and_then(numeric_value).as_deref() != Some(object_id.as_str())
+        || required_proof_fields
+            .iter()
+            .any(|field| payload.get(*field).is_none_or(Value::is_null))
+    {
+        return Err(PublicError::invalid_input(
+            "Meta did not confirm the expected resource type; no change was sent",
+            "Use an ID returned by the matching resource's read tool",
+        ));
+    }
+    Ok(payload)
+}
+
 /// Prove that a raw Graph node ID is the requested ads resource before writing it.
 pub(crate) async fn verify_meta_node(
     graph: &GraphClient,

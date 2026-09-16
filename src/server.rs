@@ -122,8 +122,8 @@ const SERVER_INSTRUCTIONS: &str = "Use this server for Meta Ads delivery, audien
 #[derive(Debug, Clone)]
 pub struct MetaAdsServer {
     tool_router: ToolRouter<Self>,
-    graph: GraphClient,
-    media_root: Option<std::path::PathBuf>,
+    pub(crate) graph: GraphClient,
+    pub(crate) media_root: Option<std::path::PathBuf>,
     plans: MutationPlanStore,
 }
 
@@ -131,7 +131,19 @@ impl MetaAdsServer {
     pub fn new(config: MetaConfig) -> Result<Self, StartupError> {
         let graph = GraphClient::new(&config)?;
         Ok(Self {
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router()
+                + Self::automation_router()
+                + Self::ad_engagement_router()
+                + Self::creative_previews_router()
+                + Self::ad_inspection_router()
+                + Self::ad_library_mutations_router()
+                + Self::experiences_router()
+                + Self::extensions_router()
+                + Self::budget_schedules_router()
+                + Self::asset_admin_router()
+                + Self::page_media_router()
+                + Self::catalog_admin_router()
+                + Self::lead_forms_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1632,31 +1644,45 @@ mod tests {
             names,
             [
                 "apply_mutation_plan",
+                "batch_catalog_items",
                 "batch_products",
                 "build_mutation_plan",
+                "change_ad_labels",
                 "clone_ad",
                 "clone_ad_set",
                 "clone_campaign",
+                "configure_catalog_advertising",
                 "create_ad",
                 "create_ad_creative",
                 "create_ad_set",
+                "create_business_asset",
                 "create_campaign",
                 "create_campaign_budget_schedule",
                 "create_custom_audience",
                 "create_custom_conversion",
+                "create_feed_error_report",
                 "create_insights_job",
+                "create_lead_form",
                 "create_lookalike_audience",
+                "create_page_backed_instagram_account",
                 "create_reach_frequency_prediction",
                 "create_report",
+                "create_test_lead",
                 "create_threads_account",
+                "delete_ad_media",
+                "delete_business_asset",
+                "delete_catalog_object",
                 "delete_custom_audience",
                 "delete_custom_conversion",
+                "delete_test_lead",
                 "discard_mutation_plan",
                 "estimate_audience_size",
+                "generate_creative_previews",
                 "get_account_controls",
                 "get_mutation_plan",
                 "get_threads_account",
                 "grant_branded_content_ad_permission",
+                "inspect_ad_object",
                 "list_ad_accounts",
                 "list_ad_creatives",
                 "list_ad_custom_derived_metrics",
@@ -1666,8 +1692,10 @@ mod tests {
                 "list_ad_videos",
                 "list_ads",
                 "list_branded_content_ad_permissions",
+                "list_business_assets",
                 "list_business_datasets",
                 "list_campaigns",
+                "list_catalog_resources",
                 "list_custom_audiences",
                 "list_custom_conversions",
                 "list_insights",
@@ -1677,19 +1705,44 @@ mod tests {
                 "list_products",
                 "list_reach_frequency_predictions",
                 "list_recommendations",
+                "manage_ad_comment",
+                "manage_ad_extensions",
+                "manage_ad_label",
+                "manage_ad_rules",
+                "manage_ad_studies",
+                "manage_budget_schedules",
+                "manage_business_asset_access",
+                "manage_catalog_connection",
                 "manage_custom_audience_users",
+                "manage_instant_experiences",
+                "manage_lead_subscription",
+                "manage_value_rules",
+                "query_targeting",
                 "read_ad",
                 "read_ad_account",
+                "read_ad_assets",
+                "read_ad_comments",
                 "read_ad_creative",
+                "read_ad_extensions",
                 "read_ad_image",
+                "read_ad_inventory",
+                "read_ad_rules",
                 "read_ad_set",
+                "read_ad_studies",
+                "read_budget_schedules",
+                "read_business_asset",
                 "read_campaign",
+                "read_catalog_batch_status",
+                "read_catalog_object",
                 "read_custom_audience",
                 "read_custom_conversion",
                 "read_dataset_quality",
                 "read_insights_job",
                 "read_insights_job_results",
+                "read_instant_experiences",
+                "read_lead_data",
                 "read_reach_frequency_prediction",
+                "read_value_rules",
                 "revoke_branded_content_ad_permission",
                 "search_ads_archive",
                 "search_behaviors",
@@ -1697,17 +1750,24 @@ mod tests {
                 "search_geo_locations",
                 "search_interests",
                 "send_capi_events",
+                "send_marketplace_signal",
+                "set_lead_form_status",
+                "share_custom_audience",
                 "suggest_interests",
                 "update_account_controls",
                 "update_ad",
                 "update_ad_creative",
                 "update_ad_set",
+                "update_business_asset",
                 "update_campaign",
                 "update_custom_audience",
                 "update_custom_conversion",
                 "upload_ad_image_asset",
                 "upload_ad_video_asset",
-                "upsert_product"
+                "upload_catalog_feed",
+                "upload_page_ad_media",
+                "upsert_product",
+                "write_catalog_object",
             ]
         );
 
@@ -1721,7 +1781,11 @@ mod tests {
                     .contains("whatsapp")
             );
             if tool.name.as_ref() != "read_ad_image" {
-                assert!(tool.output_schema.is_some());
+                assert!(
+                    tool.output_schema.is_some(),
+                    "{} requires an output schema",
+                    tool.name
+                );
             }
             let annotations = tool.annotations.unwrap();
             match tool.name.as_ref() {
@@ -1743,7 +1807,14 @@ mod tests {
                 | "grant_branded_content_ad_permission"
                 | "build_mutation_plan"
                 | "upload_ad_image_asset"
-                | "upload_ad_video_asset" => {
+                | "upload_ad_video_asset"
+                | "create_business_asset"
+                | "create_feed_error_report"
+                | "create_lead_form"
+                | "create_page_backed_instagram_account"
+                | "create_test_lead"
+                | "send_marketplace_signal"
+                | "upload_page_ad_media" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(false));
                     assert_eq!(annotations.idempotent_hint, Some(false));
@@ -1752,12 +1823,33 @@ mod tests {
                 | "batch_products"
                 | "delete_custom_conversion"
                 | "manage_custom_audience_users"
-                | "revoke_branded_content_ad_permission" => {
+                | "revoke_branded_content_ad_permission"
+                | "batch_catalog_items"
+                | "change_ad_labels"
+                | "configure_catalog_advertising"
+                | "delete_ad_media"
+                | "delete_business_asset"
+                | "delete_catalog_object"
+                | "delete_test_lead"
+                | "manage_ad_comment"
+                | "manage_ad_extensions"
+                | "manage_ad_label"
+                | "manage_ad_rules"
+                | "manage_ad_studies"
+                | "manage_budget_schedules"
+                | "manage_business_asset_access"
+                | "manage_catalog_connection"
+                | "manage_instant_experiences"
+                | "manage_value_rules"
+                | "share_custom_audience"
+                | "update_business_asset"
+                | "upload_catalog_feed"
+                | "write_catalog_object" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(true));
                     assert_eq!(annotations.idempotent_hint, Some(false));
                 }
-                "delete_custom_audience" => {
+                "delete_custom_audience" | "manage_lead_subscription" | "set_lead_form_status" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(true));
                     assert_eq!(annotations.idempotent_hint, Some(true));
@@ -1795,7 +1887,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 77);
+        assert_eq!(tools.len(), 125);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();

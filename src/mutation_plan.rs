@@ -923,6 +923,11 @@ fn validate_resource_fields(
     action: MutationActionKind,
     fields: &Map<String, Value>,
 ) -> Result<(), PublicError> {
+    if resource_type == MutationResourceType::AdSet
+        && let Some(targeting) = fields.get("targeting")
+    {
+        crate::graph_tools::validate_threads_placements(targeting)?;
+    }
     let allowlist = match (resource_type, action) {
         (MutationResourceType::CustomAudience, MutationActionKind::Create) => {
             Some(CUSTOM_AUDIENCE_CREATE_FIELDS)
@@ -1075,7 +1080,7 @@ fn validate_value(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), 
     }
 }
 
-fn whatsapp_text(text: &str) -> bool {
+pub(crate) fn whatsapp_text(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
     lower.contains("whatsapp")
         || lower.contains("whats_app")

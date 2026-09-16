@@ -961,6 +961,7 @@ fn encode_targeting(targeting: &AudienceEstimateTargeting) -> Result<String, Pub
             "Use the typed targeting fields",
         )
     })?;
+    crate::graph_tools::validate_threads_placements(&value)?;
     if let Some(enabled) = targeting
         .targeting_automation
         .as_ref()

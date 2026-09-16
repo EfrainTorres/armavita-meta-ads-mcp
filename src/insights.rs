@@ -138,6 +138,8 @@ pub struct ListInsightsInput {
     pub summary_action_breakdowns: Option<Vec<String>>,
     /// Meta v26.0 attribution windows. Values remain separate in each row.
     pub action_attribution_windows: Option<Vec<ActionAttributionWindow>>,
+    /// Optional filters, sorting, attribution settings, summaries and multiple date ranges.
+    pub options: Option<InsightOptions>,
     /// Rows to return, from 1 through 200. Defaults to 25; prefer 25-50 at ad level to keep output model-friendly.
     pub page_size: Option<u16>,
     /// Opaque `next_cursor` from the previous response.
@@ -168,20 +170,97 @@ pub struct CreateInsightsJobInput {
     pub summary_action_breakdowns: Option<Vec<String>>,
     /// Meta v26.0 attribution windows. Values remain separate in each row.
     pub action_attribution_windows: Option<Vec<ActionAttributionWindow>>,
-    /// Optional asynchronous export format. Meta currently documents CSV for this workflow.
+    pub options: Option<InsightOptions>,
+    /// Optional asynchronous export format: CSV or XLS.
     pub export_format: Option<InsightsExportFormat>,
+    #[schemars(length(min = 1, max = 50))]
+    pub export_columns: Option<Vec<String>>,
+    #[schemars(length(min = 1, max = 255))]
+    pub export_name: Option<String>,
+}
+
+graph_enum!(ActionReportTime {
+    Impression => "impression",
+    Conversion => "conversion",
+    Mixed => "mixed",
+    Lifetime => "lifetime",
+});
+
+#[derive(Debug, Default, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InsightOptions {
+    /// Meta filter objects: field (e.g. campaign.id), operator (e.g. IN), value.
+    #[schemars(length(min = 1, max = 25))]
+    pub filtering: Option<Vec<InsightFilter>>,
+    /// One sort, e.g. spend_descending or actions:link_click_ascending.
+    #[schemars(length(min = 1, max = 1), inner(length(min = 1, max = 128)))]
+    pub sort: Option<Vec<String>>,
+    pub action_report_time: Option<ActionReportTime>,
+    pub use_account_attribution_setting: Option<bool>,
+    pub use_unified_attribution_setting: Option<bool>,
+    /// Overrides single-date selection; cannot be combined with time_increment.
+    #[schemars(length(min = 1, max = 25))]
+    pub time_ranges: Option<Vec<InsightTimeRange>>,
+    pub default_summary: Option<bool>,
+    #[schemars(length(min = 1, max = 50))]
+    pub summary: Option<Vec<String>>,
+    #[schemars(range(min = 1, max = 100))]
+    pub product_id_limit: Option<u16>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct InsightFilter {
+    #[schemars(length(min = 1, max = 128))]
+    pub field: String,
+    pub operator: InsightFilterOperator,
+    /// Scalar or bounded array of values, according to the chosen operator.
+    pub value: Value,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum InsightFilterOperator {
+    Equal,
+    NotEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    LessThan,
+    LessThanOrEqual,
+    InRange,
+    NotInRange,
+    Contain,
+    NotContain,
+    ContainsAny,
+    ContainsAll,
+    NotContainsAny,
+    StemMatch,
+    In,
+    NotIn,
+    StartsWith,
+    EndsWith,
+    Any,
+    All,
+    After,
+    Before,
+    OnOrAfter,
+    OnOrBefore,
+    None,
+    Top,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum InsightsExportFormat {
     Csv,
+    Xls,
 }
 
 impl InsightsExportFormat {
     const fn as_str(self) -> &'static str {
         match self {
             Self::Csv => "csv",
+            Self::Xls => "xls",
         }
     }
 }
@@ -209,6 +288,8 @@ pub struct InsightPage {
     pub rows: Vec<InsightRow>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub next_cursor: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<InsightRow>,
 }
 
 /// One Meta-reported row. No metric, including non-additive `reach`, is aggregated.
@@ -331,12 +412,14 @@ struct InsightQuery<'a> {
     action_breakdowns: Option<&'a [String]>,
     summary_action_breakdowns: Option<&'a [String]>,
     action_attribution_windows: Option<&'a [ActionAttributionWindow]>,
+    options: Option<&'a InsightOptions>,
 }
 
 #[derive(Debug, Deserialize)]
 struct RawInsightPage {
     data: Vec<Map<String, Value>>,
     paging: Option<RawPaging>,
+    summary: Option<Map<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -462,6 +545,7 @@ fn build_list_request(input: &ListInsightsInput) -> Result<ValidatedPageRequest,
         action_breakdowns: input.action_breakdowns.as_deref(),
         summary_action_breakdowns: input.summary_action_breakdowns.as_deref(),
         action_attribution_windows: input.action_attribution_windows.as_deref(),
+        options: input.options.as_ref(),
     })?;
     let page_size = validate_page_size(input.page_size, DEFAULT_PAGE_SIZE)?;
     let cursor = validate_cursor(input.page_cursor.as_deref())?;
@@ -491,11 +575,25 @@ fn build_create_job_request(
         action_breakdowns: input.action_breakdowns.as_deref(),
         summary_action_breakdowns: input.summary_action_breakdowns.as_deref(),
         action_attribution_windows: input.action_attribution_windows.as_deref(),
+        options: input.options.as_ref(),
     })?;
     if let Some(export_format) = input.export_format {
         form.push((
             "export_format".to_owned(),
             export_format.as_str().to_owned(),
+        ));
+    }
+    if let Some(columns) = &input.export_columns {
+        normalize_fields(Some(columns))?;
+        form.push((
+            "export_columns".to_owned(),
+            crate::graph_tools::json(&serde_json::json!(columns), "export_columns")?,
+        ));
+    }
+    if let Some(name) = &input.export_name {
+        form.push((
+            "export_name".to_owned(),
+            crate::graph_tools::text(name, "export_name", 255)?,
         ));
     }
     Ok(ValidatedMutationRequest { endpoint, form })
@@ -511,6 +609,19 @@ fn build_insight_query(
         )
     })?;
     let fields = normalize_fields(input.fields)?;
+    let ranges = input
+        .options
+        .and_then(|options| options.time_ranges.as_ref());
+    if ranges.is_some()
+        && (input.time_range.is_some()
+            || input.date_preset.is_some()
+            || input.time_increment.is_some())
+    {
+        return Err(PublicError::invalid_input(
+            "time_ranges cannot be combined with another date selector or time_increment",
+            "Choose one date selection",
+        ));
+    }
     if input.date_preset.is_some() && input.time_range.is_some() {
         return Err(PublicError::invalid_input(
             "date_preset and time_range are mutually exclusive",
@@ -538,7 +649,7 @@ fn build_insight_query(
                 )
             })?,
         ));
-    } else {
+    } else if ranges.is_none() {
         params.push((
             "date_preset".to_owned(),
             input
@@ -565,7 +676,110 @@ fn build_insight_query(
         MAX_BREAKDOWNS,
     )?;
     append_attribution_windows(&mut params, input.action_attribution_windows)?;
+    if let Some(options) = input.options {
+        append_options(&mut params, options)?;
+    }
     Ok((format!("{object_id}/insights"), params))
+}
+
+fn append_options(
+    params: &mut Vec<(String, String)>,
+    options: &InsightOptions,
+) -> Result<(), PublicError> {
+    use crate::graph_tools::{json, text};
+    let invalid =
+        |message| PublicError::invalid_input(message, "Use bounded documented Insights options");
+    if let Some(filters) = &options.filtering {
+        if filters.is_empty() || filters.len() > 25 {
+            return Err(invalid("filtering must contain 1–25 filters"));
+        }
+        for filter in filters {
+            if filter.field.is_empty()
+                || filter.field.len() > 128
+                || !filter
+                    .field
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'))
+                || crate::bounded_json::credential_key(&filter.field)
+                || filter.value.is_null()
+                || filter.value.is_object()
+                || filter.value.as_array().is_some_and(|items| {
+                    items
+                        .iter()
+                        .any(|v| v.is_null() || v.is_array() || v.is_object())
+                })
+            {
+                return Err(invalid(
+                    "Each filter needs a simple field and scalar or scalar-array value",
+                ));
+            }
+        }
+        params.push((
+            "filtering".into(),
+            json(&serde_json::json!(filters), "filtering")?,
+        ));
+    }
+    if let Some(sort) = &options.sort {
+        if sort.len() != 1
+            || sort[0].is_empty()
+            || sort[0].len() > 128
+            || !sort[0]
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':'))
+        {
+            return Err(invalid(
+                "sort accepts one metric or actions:<type>, optionally ending _ascending or _descending",
+            ));
+        }
+        params.push(("sort".into(), json(&serde_json::json!(sort), "sort")?));
+    }
+    if let Some(report_time) = options.action_report_time {
+        params.push(("action_report_time".into(), report_time.as_str().into()));
+    }
+    for (key, value) in [
+        (
+            "use_account_attribution_setting",
+            options.use_account_attribution_setting,
+        ),
+        (
+            "use_unified_attribution_setting",
+            options.use_unified_attribution_setting,
+        ),
+        ("default_summary", options.default_summary),
+    ] {
+        if let Some(value) = value {
+            params.push((key.into(), value.to_string()));
+        }
+    }
+    if let Some(ranges) = &options.time_ranges {
+        if ranges.is_empty() || ranges.len() > 25 {
+            return Err(invalid("time_ranges must contain 1–25 date ranges"));
+        }
+        for range in ranges {
+            validate_time_range(range)?;
+        }
+        params.push((
+            "time_ranges".into(),
+            json(&serde_json::json!(ranges), "time_ranges")?,
+        ));
+    }
+    if let Some(summary) = &options.summary {
+        normalize_fields(Some(summary))?;
+        params.push((
+            "summary".into(),
+            json(&serde_json::json!(summary), "summary")?,
+        ));
+    }
+    if let Some(limit) = options.product_id_limit {
+        if !(1..=100).contains(&limit) {
+            return Err(invalid("product_id_limit must be 1–100"));
+        }
+        params.push((
+            "product_id_limit".into(),
+            text(&limit.to_string(), "product_id_limit", 3)?,
+        ));
+    }
+    Ok(())
 }
 
 fn build_job_results_request(
@@ -763,7 +977,12 @@ fn normalize_page(payload: Value, max_rows: usize) -> Result<InsightPage, Public
         .into_iter()
         .map(normalize_row)
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(InsightPage { rows, next_cursor })
+    let summary = raw.summary.map(normalize_row).transpose()?;
+    Ok(InsightPage {
+        rows,
+        next_cursor,
+        summary,
+    })
 }
 
 fn normalize_row(mut raw: Map<String, Value>) -> Result<InsightRow, PublicError> {
@@ -1110,9 +1329,41 @@ mod tests {
             action_breakdowns: None,
             summary_action_breakdowns: None,
             action_attribution_windows: None,
+            options: None,
             page_size: None,
             page_cursor: None,
         }
+    }
+
+    #[test]
+    fn extended_queries_keep_filters_dates_and_summary_without_changing_defaults() {
+        let mut input: ListInsightsInput = serde_json::from_value(json!({
+            "object_id":"act_123", "options": {
+                "filtering":[{"field":"campaign.id","operator":"IN","value":["42"]}],
+                "sort":["actions:link_click_ascending"], "action_report_time":"conversion",
+                "time_ranges":[{"since":"2026-01-01","until":"2026-01-31"}],
+                "use_unified_attribution_setting":true, "summary":["spend"], "product_id_limit":10
+            }
+        }))
+        .unwrap();
+        let request = build_list_request(&input).unwrap();
+        let params: std::collections::HashMap<_, _> = request.query.into_iter().collect();
+        assert!(!params.contains_key("date_preset"));
+        assert_eq!(params["sort"], "[\"actions:link_click_ascending\"]");
+        assert_eq!(params["action_report_time"], "conversion");
+        assert_eq!(params["summary"], "[\"spend\"]");
+        let result = normalize_page(
+            json!({"data":[],"summary":{"spend":"12.50","reach":"21"}}),
+            25,
+        )
+        .unwrap();
+        assert_eq!(result.summary.unwrap().spend.as_deref(), Some("12.50"));
+        input.time_increment = Some("monthly".into());
+        assert!(build_list_request(&input).is_err());
+        input.time_increment = None;
+        input.options.as_mut().unwrap().filtering.as_mut().unwrap()[0].value =
+            json!("access_token=private");
+        assert!(build_list_request(&input).is_err());
     }
 
     #[test]
@@ -1247,7 +1498,10 @@ mod tests {
             action_breakdowns: None,
             summary_action_breakdowns: None,
             action_attribution_windows: Some(vec![ActionAttributionWindow::SevenDayClick]),
+            options: None,
             export_format: Some(InsightsExportFormat::Csv),
+            export_columns: None,
+            export_name: None,
         })
         .unwrap();
         assert_eq!(request.endpoint, "act_123/insights");

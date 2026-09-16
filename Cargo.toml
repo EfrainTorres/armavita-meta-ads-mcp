@@ -1,6 +1,6 @@
 [package]
 name = "armavita-meta-ads-mcp"
-version = "2.0.0-rc.1"
+version = "2.0.0-rc.2"
 description = "Local-first MCP server for Meta Ads automation and reporting workflows"
 readme = "README.md"
 repository = "https://github.com/EfrainTorres/armavita-meta-ads-mcp"

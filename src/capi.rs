@@ -661,6 +661,18 @@ fn forbidden_app_data_value(value: &str) -> bool {
         || lower.contains("wa.me/")
 }
 
+pub(crate) fn normalized_user_data_json(
+    input: CapiUserDataInput,
+) -> Result<serde_json::Value, PublicError> {
+    let normalized = normalize_user_data(input, &mut 0)?;
+    serde_json::to_value(normalized).map_err(|_| {
+        PublicError::invalid_input(
+            "user_data could not be encoded",
+            "Use the typed matching fields",
+        )
+    })
+}
+
 fn normalize_user_data(
     input: CapiUserDataInput,
     raw_bytes: &mut usize,
