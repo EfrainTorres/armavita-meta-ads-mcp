@@ -1,0 +1,42 @@
+[package]
+name = "armavita-meta-ads-mcp"
+version = "2.0.0-rc.1"
+description = "Local-first MCP server for Meta Ads automation and reporting workflows"
+readme = "README.md"
+repository = "https://github.com/EfrainTorres/armavita-meta-ads-mcp"
+keywords = ["ads", "facebook", "mcp", "meta"]
+categories = ["command-line-utilities"]
+include = ["/.gitignore", "/.mcp.json", "/Cargo.toml", "/LICENSE", "/README.md", "/SECURITY.md", "/docs/**", "/run.sh", "/src/**", "/tests/**", "/rust-toolchain.toml"]
+edition = "2024"
+rust-version = "1.98.0"
+license = "AGPL-3.0-only"
+
+[dependencies]
+base64 = "=0.22.1"
+getrandom = "=0.4.3"
+reqwest = { version = "=0.13.4", default-features = false, features = ["form", "gzip", "json", "multipart", "query", "rustls", "stream"] }
+rmcp = { version = "=3.1.4", default-features = false, features = ["macros", "server", "transport-io"] }
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.151"
+sha2 = { version = "=0.11.0", default-features = false }
+subtle = "=2.6.1"
+thiserror = "=2.0.20"
+tokio = { version = "=1.53.1", features = ["fs", "io-std", "io-util", "macros", "net", "rt", "sync", "time"] }
+tokio-util = { version = "=0.7.19", default-features = false, features = ["io"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt"] }
+
+[dev-dependencies]
+rmcp = { version = "=3.1.4", default-features = false, features = ["macros", "server", "transport-io", "client", "transport-child-process"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+panic = "abort"
+strip = "symbols"

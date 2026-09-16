@@ -1,2 +1,0 @@
-# Install from local project metadata
--e .

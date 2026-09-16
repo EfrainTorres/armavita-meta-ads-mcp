@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "meta-ads-armavita": {
+      "type": "stdio",
+      "command": "armavita-meta-ads-mcp",
+      "args": ["--transport=stdio"]
+    }
+  }
+}

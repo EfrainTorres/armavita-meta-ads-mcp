@@ -1,24 +1,34 @@
-# Security Policy
+# Security
 
-## Supported Versions
+## Report a vulnerability
 
-Security fixes are provided for the latest released version.
+Report vulnerabilities [privately on GitHub](https://github.com/EfrainTorres/armavita-meta-ads-mcp/security/advisories/new).
+Include the version, steps to
+reproduce the issue, and its impact. Never post tokens, app secrets, or customer data in public issues.
 
-## Reporting a Vulnerability
+## Use it safely
 
-Please report security issues privately. Do not open public issues for active vulnerabilities.
+- Run this server locally with a trusted MCP client. It has no public HTTP endpoint. The local
+  connection does not limit incoming MCP message sizes or simultaneous requests.
+- Keep credentials in your environment or the private OAuth cache. Never include them in prompts,
+  tool arguments, or committed configuration. Revoke any credential that has been exposed.
+- Give the Meta token only the permissions and account access you need. Keep your MCP client's
+  write approvals enabled.
+- Upload only customer data you are authorized to use. Hashing does not make that data anonymous.
+- Enable local media uploads only from a folder whose parent directories you also control. Keep
+  other processes from changing the folder or its files during uploads; path checks cannot prevent those races.
 
-Include:
+## Approving changes
 
-- Affected version/commit
-- Reproduction steps
-- Impact assessment
-- Suggested remediation (if available)
+Review a mutation plan before applying it. Plans expire after 15 minutes and disappear when the
+server restarts. Each plan contains one request; a group of plans is not an all-or-nothing operation.
 
-Use your repository host's private vulnerability reporting flow when available.
+Applying a plan requires `APPLY_LIVE_META_ADS_CHANGES`. Deletions and other removals also require
+`CONFIRM_META_ADS_REMOVALS`. These phrases confirm intent; they do not replace client approvals
+or Meta permissions.
 
-## Sensitive Data Handling
+Writes are never retried automatically. If a request times out or returns `outcome_unknown`, check
+Meta before trying again—the change may already have happened.
 
-- Never commit access tokens, secrets, or production credentials.
-- Rotate exposed credentials immediately.
-- Redact tokens and account IDs from shared logs when possible.
+See [setup](docs/SETUP.md) for authentication and [migration status](docs/MIGRATION.md#status)
+for workflows that still need live testing.
