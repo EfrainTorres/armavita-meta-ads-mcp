@@ -1,6 +1,6 @@
 # Meta, Instagram, Facebook Ads MCP
 
-> **Rust preview available:** [Try v2.0.0-rc.1](https://github.com/EfrainTorres/armavita-meta-ads-mcp/releases/tag/v2.0.0-rc.1), our lighter Rust rewrite. [Setup and migration](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/rust). Python remains the default during the preview and is preserved on [`python-legacy`](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/python-legacy).
+> **Rust preview available:** [Try v2.0.0-rc.1](https://github.com/EfrainTorres/armavita-meta-ads-mcp/releases/tag/v2.0.0-rc.1), our lighter Rust rewrite. [Setup and migration](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/rust). Rust is now the default branch. Python is preserved on [`python-legacy`](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/python-legacy).
 
 <p align="center">
   <img src="docs/assets/armavita-meta-ads-mcp-hero-1080.jpg" alt="ArmaVita Meta Ads MCP hero image" width="100%" />
