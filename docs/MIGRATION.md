@@ -39,9 +39,10 @@ cover deletions. After an uncertain write result, check Meta before retrying.
 
 ## Status
 
-This is a release candidate. Testing with Codex, Claude Code, and live Meta accounts is still in
-progress. Verify your workflows with test assets before switching production use.
+The Rust server is smoke tested and has been heavily used internally over the past month.
+Please [report any issues](https://github.com/EfrainTorres/armavita-meta-ads-mcp/issues)
+with the tool name and steps to reproduce.
 
-Customer-audience uploads using mobile/app identifiers (`MADID`/`APPUID`) still need live verification
-because Meta's SDK and examples differ on hashing. Advanced features also depend on Meta permissions
-and asset eligibility. WhatsApp-specific workflows are not included.
+For customer-audience uploads using mobile/app identifiers (`MADID`/`APPUID`), check Meta's hashing
+requirements; its SDK and examples differ. Advanced features also depend on Meta permissions and
+asset eligibility. WhatsApp-specific workflows are not included.

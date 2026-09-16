@@ -6,8 +6,8 @@ Manage Facebook and Instagram ads from Claude Code, Codex, or another MCP-compat
 and work with audiences, catalogs, and conversions. The server runs locally as a single executable
 and uses Meta Marketing API v26.
 
-**Rust 2.0 release candidate:** live Meta workflow validation is still in progress.
-[See the current status](docs/MIGRATION.md#status).
+**Rust 2.0 release candidate:** smoke tested and heavily used internally over the past month.
+Please [report any issues](https://github.com/EfrainTorres/armavita-meta-ads-mcp/issues) you run into.
 
 ## Why we rebuilt it in Rust
 

@@ -30,5 +30,5 @@ or Meta permissions.
 Writes are never retried automatically. If a request times out or returns `outcome_unknown`, check
 Meta before trying again—the change may already have happened.
 
-See [setup](docs/SETUP.md) for authentication and [migration status](docs/MIGRATION.md#status)
-for workflows that still need live testing.
+See [setup](docs/SETUP.md) for authentication and the [migration guide](docs/MIGRATION.md)
+for changes from Python.
