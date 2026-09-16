@@ -2,10 +2,11 @@
 
 Manage Facebook, Instagram, and Threads ads from Claude Code, Codex, or another MCP-compatible assistant.
 
-**125 tools** cover campaign management, reporting, lead forms, catalogs, audiences, and more.
-Related operations share tools, so you can do more without loading hundreds of near-duplicates.
-The server runs locally as a single executable
-and uses Meta Marketing API v26.
+We built this for fast startup, low memory use, and broad advertising coverage in one local server.
+**125 tools** cover campaigns, reporting, lead forms, catalogs, audiences, and more, with compact
+responses and safeguards for sensitive changes. Related actions share tools to keep the list manageable.
+
+It runs as a single executable with no Python environment to maintain and uses Meta Marketing API v26.
 
 **Rust 2.0 release candidate:** smoke tested and heavily used internally.
 Please [report any issues](https://github.com/EfrainTorres/armavita-meta-ads-mcp/issues) you run into.
