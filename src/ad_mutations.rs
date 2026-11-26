@@ -27,6 +27,7 @@ const MAX_HASH_CHARS: usize = 128;
 const MAX_TEXT_VARIANTS: usize = 5;
 const MAX_FLEX_IMAGES: usize = 10;
 const MIN_CAROUSEL_CARDS: usize = 2;
+const PRODUCT_EXTENSIONS_OPT_OUT: &str = r#"{"creative_features_spec":{"product_extensions":{"enroll_status":"OPT_OUT","action_metadata":{"type":"MANUAL"}}}}"#;
 const MAX_CAROUSEL_CARDS: usize = 10;
 const MAX_RENAME_CHARS: usize = 100;
 const MAX_NESTED_SPEC_BYTES: usize = 64 * 1024;
@@ -130,6 +131,9 @@ pub struct CreateAdCreativeInput {
     /// Optional query-string tags without a leading `?`; never include secrets.
     #[schemars(length(min = 1, max = 2048))]
     pub url_tags: Option<String>,
+    /// Set `true` to opt out of product extensions (Product showcase), which Meta
+    /// can enable automatically on eligible creatives since v27. Omit to keep Meta's default.
+    pub opt_out_product_extensions: Option<bool>,
 }
 
 /// Rename an existing creative. Meta v26 does not permit content/spec updates on
@@ -845,6 +849,12 @@ fn build_create_creative_request(
     append_creative_content(&mut form, &input.content)?;
     if let Some(url_tags) = &input.url_tags {
         form.push(("url_tags".to_owned(), bounded_url_tags(url_tags)?));
+    }
+    if input.opt_out_product_extensions == Some(true) {
+        form.push((
+            "degrees_of_freedom_spec".to_owned(),
+            PRODUCT_EXTENSIONS_OPT_OUT.to_owned(),
+        ));
     }
     Ok(MutationRequest {
         endpoint: format!("{account_id}/adcreatives"),
@@ -1678,6 +1688,7 @@ mod tests {
                 }),
             },
             url_tags: Some("utm_source=meta".to_owned()),
+            opt_out_product_extensions: None,
         })
         .unwrap();
         assert_eq!(
@@ -1695,6 +1706,41 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn opts_out_of_v27_product_extensions_only_when_asked() {
+        let input = |opt_out| CreateAdCreativeInput {
+            ad_account_id: "1".to_owned(),
+            name: "Image creative".to_owned(),
+            content: AdCreativeContent::Image {
+                page_id: "2".to_owned(),
+                instagram_user_id: None,
+                image: CreativeImageSource::Hash {
+                    hash: "abc_123".to_owned(),
+                },
+                link_url: "https://example.com/offer".to_owned(),
+                primary_text: None,
+                headline: None,
+                description: None,
+                call_to_action: None,
+            },
+            url_tags: None,
+            opt_out_product_extensions: opt_out,
+        };
+        let request = build_create_creative_request(&input(Some(true))).unwrap();
+        let spec: serde_json::Value = serde_json::from_str(
+            form_value(&request.form, "degrees_of_freedom_spec").expect("opt-out spec"),
+        )
+        .unwrap();
+        assert_eq!(
+            spec["creative_features_spec"]["product_extensions"]["enroll_status"],
+            "OPT_OUT"
+        );
+        for opt_out in [None, Some(false)] {
+            let request = build_create_creative_request(&input(opt_out)).unwrap();
+            assert!(form_value(&request.form, "degrees_of_freedom_spec").is_none());
+        }
     }
 
     #[test]
@@ -1717,6 +1763,7 @@ mod tests {
                 },
             },
             url_tags: None,
+            opt_out_product_extensions: None,
         })
         .unwrap();
         assert_eq!(
@@ -1744,6 +1791,7 @@ mod tests {
                 source_instagram_media_id: "42".to_owned(),
             },
             url_tags: None,
+            opt_out_product_extensions: None,
         })
         .unwrap();
         assert_eq!(
@@ -1771,6 +1819,7 @@ mod tests {
                 call_to_action: Some(CreativeCallToActionType::ShopNow),
             },
             url_tags: None,
+            opt_out_product_extensions: None,
         })
         .unwrap();
         assert_eq!(
@@ -1824,6 +1873,7 @@ mod tests {
                 call_to_action: Some(CreativeCallToActionType::ShopNow),
             },
             url_tags: None,
+            opt_out_product_extensions: None,
         })
         .unwrap();
         let feed: Value =
@@ -1855,6 +1905,7 @@ mod tests {
                 }],
             },
             url_tags: None,
+            opt_out_product_extensions: None,
         };
         assert!(build_create_creative_request(&invalid_carousel).is_err());
     }

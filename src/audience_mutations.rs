@@ -129,8 +129,10 @@ pub struct ManageCustomAudienceUsersInput {
     pub replace_session: Option<ReplaceAudienceSession>,
 }
 
-/// Create a country-based lookalike. Non-destructive and non-idempotent: a
-/// repeated ambiguous request can create a duplicate audience.
+/// Create a lookalike. Since Graph v27 a lookalike has no country of its own: it
+/// delivers to the locations of the ad sets that use it, so those ad sets must
+/// target a location. Non-destructive and non-idempotent: a repeated ambiguous
+/// request can create a duplicate audience.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLookalikeAudienceInput {
@@ -140,7 +142,7 @@ pub struct CreateLookalikeAudienceInput {
     pub name: String,
     /// Numeric seed custom-audience ID.
     pub origin_audience_id: String,
-    /// Typed country-based lookalike definition.
+    /// Typed lookalike size. Location comes from the ad sets that use it.
     pub lookalike_spec: LookalikeSpecInput,
     /// Optional description, up to 1,000 characters.
     pub description: Option<String>,
@@ -275,15 +277,13 @@ impl LookalikeAudienceType {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LookalikeSpecInput {
-    /// Two-letter country code.
-    pub country: String,
     /// Meta preset. Provide exactly one of `audience_type` or `ratio`.
     pub audience_type: Option<LookalikeAudienceType>,
     /// Custom top percentage as a fraction, 0.01 through 0.20 in 0.01 steps.
     pub ratio: Option<f64>,
     /// Optional range start in 0.01 steps; requires `ratio` and must be smaller.
     pub starting_ratio: Option<f64>,
-    /// Permit Meta to find seed members outside the requested country.
+    /// Permit Meta to use seed members from every country.
     pub allow_international_seeds: Option<bool>,
 }
 
@@ -962,9 +962,7 @@ fn normalize_fixed_digits(
 }
 
 fn encode_lookalike_spec(input: &LookalikeSpecInput) -> Result<String, PublicError> {
-    let country = normalize_country(&input.country)?;
     let mut spec = Map::new();
-    spec.insert("country".to_owned(), Value::String(country));
     match (input.audience_type, input.ratio) {
         (Some(audience_type), None) => {
             if input.starting_ratio.is_some() {
@@ -1184,17 +1182,6 @@ fn bounded_text_allow_empty(
         ));
     }
     Ok(value.to_owned())
-}
-
-fn normalize_country(raw: &str) -> Result<String, PublicError> {
-    let country = raw.trim().to_ascii_uppercase();
-    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        return Err(PublicError::invalid_input(
-            "country must be a two-letter country code",
-            "Use an ISO 3166-1 alpha-2 code such as US",
-        ));
-    }
-    Ok(country)
 }
 
 fn is_sha256_hex(value: &str) -> bool {
@@ -1825,13 +1812,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_typed_country_lookalike_spec() {
+    fn builds_a_v27_lookalike_spec_without_location() {
         let request = build_lookalike_request(&CreateLookalikeAudienceInput {
             ad_account_id: "123".to_owned(),
             name: " Similar ".to_owned(),
             origin_audience_id: "456".to_owned(),
             lookalike_spec: LookalikeSpecInput {
-                country: "us".to_owned(),
                 audience_type: None,
                 ratio: Some(0.02),
                 starting_ratio: Some(0.01),
@@ -1850,12 +1836,21 @@ mod tests {
         assert_eq!(
             spec,
             json!({
-                "country": "US",
                 "starting_ratio": 0.01,
                 "ratio": 0.02,
                 "allow_international_seeds": false
             })
         );
+    }
+
+    #[test]
+    fn v27_rejects_lookalike_country_and_location_spec() {
+        for spec in [
+            json!({"country": "US", "ratio": 0.01}),
+            json!({"location_spec": {"geo_locations": {"countries": ["US"]}}, "ratio": 0.01}),
+        ] {
+            assert!(serde_json::from_value::<LookalikeSpecInput>(spec).is_err());
+        }
     }
 
     #[test]
@@ -1949,7 +1944,6 @@ mod tests {
             name: "Similar".to_owned(),
             origin_audience_id: "456".to_owned(),
             lookalike_spec: LookalikeSpecInput {
-                country: "USA".to_owned(),
                 audience_type: None,
                 ratio: Some(0.015),
                 starting_ratio: None,

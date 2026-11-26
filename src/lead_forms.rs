@@ -36,6 +36,7 @@ const CREATE_FIELDS: &[&str] = &[
     "is_phone_sms_verify_enabled",
     "locale",
     "name",
+    "phone_otp_verification_type",
     "privacy_policy",
     "question_page_custom_headline",
     "questions",
@@ -303,6 +304,16 @@ fn create_request(input: &CreateLeadFormInput) -> Result<(String, Params), Publi
                     .ok_or_else(|| invalid("Form URLs must be strings"))?,
             )?;
         }
+    }
+    if let Some(value) = input.fields.get("phone_otp_verification_type")
+        && !matches!(
+            value.as_str(),
+            Some("NOT_ENABLED" | "OTP_REQUIRED" | "OTP_OPTIONAL")
+        )
+    {
+        return Err(invalid(
+            "phone_otp_verification_type must be NOT_ENABLED, OTP_REQUIRED, or OTP_OPTIONAL",
+        ));
     }
     let params = graph_tools::form_fields(&input.fields, CREATE_FIELDS)?;
     Ok((format!("{page_id}/leadgen_forms"), params))
@@ -741,6 +752,7 @@ mod tests {
             ("status", json!("DELETED")),
             ("cover_photo", json!("/tmp/photo.jpg")),
             ("questions", json!([])),
+            ("phone_otp_verification_type", json!("ALWAYS")),
         ] {
             let mut input = form();
             input.fields.insert(key.into(), value);
