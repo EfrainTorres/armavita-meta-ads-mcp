@@ -16,6 +16,8 @@ pub(crate) fn mutation_error_without_blind_retry(
                 ..
             }
     );
+    // Meta details and any `retry_after_seconds` survive: they tell the caller
+    // how long to wait before verifying, even though the write is not retried.
     let mut error = PublicError::from(error);
     if outcome_is_ambiguous {
         error.retryable = false;
@@ -33,13 +35,14 @@ pub(crate) fn ambiguous_mutation_result(
         message: message.into(),
         retryable: false,
         action: Some(verify_action.to_owned()),
+        details: Default::default(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{ambiguous_mutation_result, mutation_error_without_blind_retry};
-    use crate::error::GraphError;
+    use crate::error::{ApiErrorDetails, GraphError, MetaErrorDetails, RateLimitDetails};
 
     #[test]
     fn only_uncertain_write_outcomes_replace_the_retry_action() {
@@ -62,6 +65,7 @@ mod tests {
                     code: Some(2),
                     message: "temporarily unavailable".to_owned(),
                     retryable: true,
+                    details: None,
                 },
                 true,
             ),
@@ -71,6 +75,7 @@ mod tests {
                     code: Some(100),
                     message: "invalid parameter".to_owned(),
                     retryable: false,
+                    details: None,
                 },
                 false,
             ),
@@ -84,6 +89,45 @@ mod tests {
                 outcome_is_ambiguous
             );
         }
+    }
+
+    #[test]
+    fn throttled_writes_keep_the_wait_and_meta_details_but_never_retry() {
+        let error = mutation_error_without_blind_retry(
+            GraphError::Api {
+                status: 400,
+                code: Some(80004),
+                message: "request rejected".to_owned(),
+                retryable: true,
+                details: Some(Box::new(ApiErrorDetails {
+                    meta: Some(MetaErrorDetails {
+                        code: Some(80004),
+                        error_subcode: Some(2_446_079),
+                        fbtrace_id: Some("AbC123".to_owned()),
+                        rate_limit: Some(RateLimitDetails {
+                            scope: "business_use_case".to_owned(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    }),
+                    retry_after_seconds: Some(600),
+                })),
+            },
+            "Verify provider state before retrying",
+        );
+        assert_eq!(error.code, "RATE_LIMITED");
+        assert!(!error.retryable);
+        assert_eq!(
+            error.action.as_deref(),
+            Some("Verify provider state before retrying")
+        );
+        assert_eq!(error.details.retry_after_seconds, Some(600));
+        let meta = error.details.meta.as_ref().unwrap();
+        assert_eq!(meta.error_subcode, Some(2_446_079));
+        assert_eq!(meta.fbtrace_id.as_deref(), Some("AbC123"));
+        let encoded = serde_json::to_value(&error).unwrap();
+        assert_eq!(encoded["retry_after_seconds"], 600);
+        assert_eq!(encoded["meta"]["rate_limit"]["scope"], "business_use_case");
     }
 
     #[test]

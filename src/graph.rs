@@ -1,7 +1,7 @@
 use std::{
     fmt,
     sync::{
-        Arc,
+        Arc, PoisonError, RwLock,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -14,13 +14,13 @@ use reqwest::{
     redirect::Policy,
 };
 use serde_json::Value;
-use tokio::io::AsyncReadExt;
+use sha2::{Digest, Sha256};
+use tokio::{io::AsyncReadExt, time::Instant};
 use tokio_util::io::ReaderStream;
 
 use crate::{
-    auth::invalidate_cached_token,
     config::{MAX_RESPONSE_BYTES, MAX_RETRIES, MetaConfig, REQUEST_TIMEOUT, TokenOrigin},
-    error::{GraphError, StartupError},
+    error::{ApiErrorDetails, GraphError, MetaErrorDetails, RateLimitDetails, StartupError},
 };
 
 const USER_AGENT: &str = concat!("armavita-meta-ads-mcp/", env!("CARGO_PKG_VERSION"));
@@ -47,16 +47,226 @@ const SENSITIVE_KEYS: [&str; 5] = [
     "client_secret",
     "token",
 ];
+/// Longest single pause a GET retry may take. A longer wait demanded by Meta
+/// is returned to the caller as `retry_after_seconds` instead of being slept.
+const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
+/// Meta's regain estimates can be hours; never promise more than a day.
+const MAX_REPORTED_WAIT_SECONDS: u64 = 24 * 60 * 60;
+const MAX_USAGE_HEADER_BYTES: usize = 8 * 1024;
+const MIN_ACCESS_TOKEN_CHARS: usize = 20;
+const MAX_PROVIDER_TOKEN_CHARS: usize = 64;
+
+type TokenDigest = [u8; 32];
 
 #[derive(Clone)]
 pub(crate) struct GraphClient {
     client: reqwest::Client,
     media_client: reqwest::Client,
     api_base: String,
-    authenticated: Arc<AtomicBool>,
-    cache_backed: bool,
     // Page-scoped clones reuse the pool and keep credentials out of results/Debug.
-    authorization: Option<HeaderValue>,
+    credential: Credential,
+}
+
+/// Bearer credential used for a request.
+///
+/// The user credential is shared by every clone. When Meta rejects it (codes
+/// 102/190) it is set aside and the next request re-reads `META_ACCESS_TOKEN`
+/// and the OAuth token cache, so a refreshed token works without a restart.
+/// A Page credential belongs to one scoped clone and never touches the user's.
+#[derive(Clone)]
+enum Credential {
+    User(Arc<UserCredential>),
+    Page {
+        authorization: HeaderValue,
+        revoked: Arc<AtomicBool>,
+    },
+}
+
+struct UserCredential {
+    state: RwLock<UserCredentialState>,
+    source: Arc<dyn CredentialSource>,
+}
+
+#[derive(Default)]
+struct UserCredentialState {
+    active: Option<ActiveCredential>,
+    /// Digest of the last token Meta rejected; it is never installed again.
+    rejected: Option<TokenDigest>,
+}
+
+struct ActiveCredential {
+    authorization: HeaderValue,
+    digest: TokenDigest,
+    origin: Option<TokenOrigin>,
+}
+
+/// The credential a single request carried, so a rejection only retires the
+/// token that was actually refused.
+struct UsedCredential {
+    authorization: HeaderValue,
+    user_digest: Option<TokenDigest>,
+}
+
+/// Where a rejected user token is looked up again.
+pub(crate) trait CredentialSource: Send + Sync {
+    fn environment_token(&self) -> Option<String>;
+    fn cached_token(&self) -> Option<String>;
+    /// Remove the OAuth cache only while it still holds the rejected token.
+    fn discard_cached(&self, rejected: &TokenDigest);
+}
+
+/// Production source: the process environment, then the OAuth token cache.
+struct EnvironmentAndCache;
+
+impl CredentialSource for EnvironmentAndCache {
+    fn environment_token(&self) -> Option<String> {
+        std::env::var("META_ACCESS_TOKEN")
+            .ok()
+            .map(|value| value.trim().to_owned())
+            .filter(|value| value.chars().count() >= MIN_ACCESS_TOKEN_CHARS)
+    }
+
+    fn cached_token(&self) -> Option<String> {
+        crate::auth::load_cached_access_token()
+    }
+
+    fn discard_cached(&self, rejected: &TokenDigest) {
+        if crate::auth::load_cached_access_token()
+            .is_some_and(|token| token_digest(&token) == *rejected)
+        {
+            crate::auth::invalidate_cached_token();
+        }
+    }
+}
+
+/// Unit tests must never read or delete the developer's real token cache.
+#[cfg(test)]
+struct NoCredentialSource;
+
+#[cfg(test)]
+impl CredentialSource for NoCredentialSource {
+    fn environment_token(&self) -> Option<String> {
+        None
+    }
+
+    fn cached_token(&self) -> Option<String> {
+        None
+    }
+
+    fn discard_cached(&self, _rejected: &TokenDigest) {}
+}
+
+fn default_credential_source() -> Arc<dyn CredentialSource> {
+    #[cfg(not(test))]
+    {
+        Arc::new(EnvironmentAndCache)
+    }
+    #[cfg(test)]
+    {
+        let _ = EnvironmentAndCache;
+        Arc::new(NoCredentialSource)
+    }
+}
+
+fn token_digest(token: &str) -> TokenDigest {
+    Sha256::digest(token.as_bytes()).into()
+}
+
+fn bearer_header(token: &str) -> Option<HeaderValue> {
+    let mut authorization = HeaderValue::from_str(&format!("Bearer {token}")).ok()?;
+    authorization.set_sensitive(true);
+    Some(authorization)
+}
+
+impl UserCredential {
+    fn current(&self) -> Result<UsedCredential, GraphError> {
+        if let Some(active) = self
+            .state
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .active
+            .as_ref()
+        {
+            return Ok(active.used());
+        }
+
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(active) = state.active.as_ref() {
+            return Ok(active.used());
+        }
+        // Same precedence as start-up: the environment first, then the cache.
+        // The cache is read only when the environment offers nothing new.
+        if let Some(used) = self
+            .source
+            .environment_token()
+            .and_then(|token| state.install(&token, TokenOrigin::Environment))
+        {
+            return Ok(used);
+        }
+        if let Some(used) = self
+            .source
+            .cached_token()
+            .and_then(|token| state.install(&token, TokenOrigin::Cache))
+        {
+            return Ok(used);
+        }
+
+        Err(if state.rejected.is_some() {
+            GraphError::AuthExpired
+        } else {
+            GraphError::NotAuthenticated
+        })
+    }
+
+    fn reject(&self, digest: TokenDigest) {
+        let mut state = self.state.write().unwrap_or_else(PoisonError::into_inner);
+        let Some(active) = state
+            .active
+            .as_ref()
+            .filter(|active| active.digest == digest)
+        else {
+            // A concurrent request already replaced the refused token.
+            return;
+        };
+        let from_cache = active.origin == Some(TokenOrigin::Cache);
+        state.active = None;
+        state.rejected = Some(digest);
+        drop(state);
+        tracing::warn!("Meta rejected the access token; the next request re-reads it");
+        if from_cache {
+            self.source.discard_cached(&digest);
+        }
+    }
+}
+
+impl UserCredentialState {
+    fn install(&mut self, token: &str, origin: TokenOrigin) -> Option<UsedCredential> {
+        let digest = token_digest(token);
+        if self.rejected == Some(digest) {
+            return None;
+        }
+        let authorization = bearer_header(token)?;
+        if self.rejected.is_some() {
+            tracing::info!("using a refreshed Meta access token after a rejection");
+        }
+        let active = ActiveCredential {
+            authorization,
+            digest,
+            origin: Some(origin),
+        };
+        let used = active.used();
+        self.active = Some(active);
+        Some(used)
+    }
+}
+
+impl ActiveCredential {
+    fn used(&self) -> UsedCredential {
+        UsedCredential {
+            authorization: self.authorization.clone(),
+            user_digest: Some(self.digest),
+        }
+    }
 }
 
 pub(crate) struct UploadFile {
@@ -69,27 +279,47 @@ pub(crate) struct UploadFile {
 
 impl fmt::Debug for GraphClient {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (authenticated, page_scoped) = match &self.credential {
+            Credential::User(user) => (
+                user.state
+                    .read()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .active
+                    .is_some(),
+                false,
+            ),
+            Credential::Page { revoked, .. } => (!revoked.load(Ordering::Relaxed), true),
+        };
         formatter
             .debug_struct("GraphClient")
             .field("api_base", &self.api_base)
-            .field("authenticated", &self.authenticated.load(Ordering::Relaxed))
-            .field("cache_backed", &self.cache_backed)
+            .field("authenticated", &authenticated)
+            .field("page_scoped", &page_scoped)
             .finish_non_exhaustive()
     }
 }
 
 impl GraphClient {
     pub(crate) fn new(config: &MetaConfig) -> Result<Self, StartupError> {
-        let mut headers = HeaderMap::new();
+        Self::with_credential_source(config, default_credential_source())
+    }
+
+    pub(crate) fn with_credential_source(
+        config: &MetaConfig,
+        source: Arc<dyn CredentialSource>,
+    ) -> Result<Self, StartupError> {
+        let mut state = UserCredentialState::default();
         if let Some(token) = &config.access_token {
-            let mut authorization = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
-                .map_err(|_| StartupError::InvalidAccessToken)?;
-            authorization.set_sensitive(true);
-            headers.insert(AUTHORIZATION, authorization);
+            let authorization =
+                bearer_header(token.expose()).ok_or(StartupError::InvalidAccessToken)?;
+            state.active = Some(ActiveCredential {
+                authorization,
+                digest: token_digest(token.expose()),
+                origin: config.token_origin,
+            });
         }
 
         let client = reqwest::Client::builder()
-            .default_headers(headers)
             .user_agent(USER_AGENT)
             .connect_timeout(Duration::from_secs(10))
             .timeout(REQUEST_TIMEOUT)
@@ -120,10 +350,38 @@ impl GraphClient {
             client,
             media_client,
             api_base: config.api_base.trim_end_matches('/').to_owned(),
-            authenticated: Arc::new(AtomicBool::new(config.access_token.is_some())),
-            cache_backed: config.token_origin == Some(TokenOrigin::Cache),
-            authorization: None,
+            credential: Credential::User(Arc::new(UserCredential {
+                state: RwLock::new(state),
+                source,
+            })),
         })
+    }
+
+    fn current_credential(&self) -> Result<UsedCredential, GraphError> {
+        match &self.credential {
+            Credential::User(user) => user.current(),
+            Credential::Page {
+                authorization,
+                revoked,
+            } => {
+                if revoked.load(Ordering::Acquire) {
+                    Err(GraphError::NotAuthenticated)
+                } else {
+                    Ok(UsedCredential {
+                        authorization: authorization.clone(),
+                        user_digest: None,
+                    })
+                }
+            }
+        }
+    }
+
+    fn reject_credential(&self, used: &UsedCredential) {
+        match (&self.credential, used.user_digest) {
+            (Credential::User(user), Some(digest)) => user.reject(digest),
+            (Credential::Page { revoked, .. }, None) => revoked.store(true, Ordering::Release),
+            _ => {}
+        }
     }
 
     pub(crate) async fn get_json(
@@ -131,9 +389,7 @@ impl GraphClient {
         endpoint: &str,
         query: &[(String, String)],
     ) -> Result<Value, GraphError> {
-        if !self.authenticated.load(Ordering::Acquire) {
-            return Err(GraphError::NotAuthenticated);
-        }
+        let credential = self.current_credential()?;
         if !valid_endpoint(endpoint) {
             return Err(GraphError::InvalidEndpoint);
         }
@@ -144,7 +400,7 @@ impl GraphClient {
         let url = format!("{}/{}", self.api_base, endpoint.trim_matches('/'));
         tokio::time::timeout(
             TOTAL_GET_TIMEOUT,
-            self.get_json_with_retries(&url, query, false),
+            self.get_json_with_retries(&url, query, false, &credential),
         )
         .await
         .unwrap_or_else(|_| {
@@ -158,12 +414,12 @@ impl GraphClient {
     /// Clones share the HTTP pool, but a revoked Page token cannot invalidate the user's token.
     pub(crate) async fn for_page(&self, page_id: &str) -> Result<Self, GraphError> {
         let page_id = crate::meta_ids::numeric(page_id).ok_or(GraphError::InvalidEndpoint)?;
-        self.ensure_mutation_input(page_id)?;
+        let credential = self.ensure_mutation_input(page_id)?;
         let url = format!("{}/{}", self.api_base, page_id);
         let query = [("fields".to_owned(), "access_token".to_owned())];
         let mut payload = tokio::time::timeout(
             TOTAL_GET_TIMEOUT,
-            self.get_json_with_retries(&url, &query, true),
+            self.get_json_with_retries(&url, &query, true, &credential),
         )
         .await
         .map_err(|_| GraphError::Transport {
@@ -178,22 +434,24 @@ impl GraphClient {
             })
             .filter(|token| !token.is_empty() && token.len() <= 8192)
             .ok_or(GraphError::PageAccessRequired)?;
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
-            .map_err(|_| GraphError::PageAccessRequired)?;
-        authorization.set_sensitive(true);
+        let authorization = bearer_header(&token).ok_or(GraphError::PageAccessRequired)?;
         let mut scoped = self.clone();
-        scoped.authorization = Some(authorization);
-        scoped.authenticated = Arc::new(AtomicBool::new(true));
-        scoped.cache_backed = false;
+        scoped.credential = Credential::Page {
+            authorization,
+            revoked: Arc::new(AtomicBool::new(false)),
+        };
         Ok(scoped)
     }
 
-    fn request(&self, method: Method, url: impl AsRef<str>) -> reqwest::RequestBuilder {
-        let request = self.client.request(method, url.as_ref());
-        match &self.authorization {
-            Some(authorization) => request.header(AUTHORIZATION, authorization.clone()),
-            None => request,
-        }
+    fn request(
+        &self,
+        method: Method,
+        url: impl AsRef<str>,
+        credential: &UsedCredential,
+    ) -> reqwest::RequestBuilder {
+        self.client
+            .request(method, url.as_ref())
+            .header(AUTHORIZATION, credential.authorization.clone())
     }
 
     /// Submit one bounded, form-encoded Graph mutation.
@@ -205,19 +463,19 @@ impl GraphClient {
         endpoint: &str,
         form: &[(String, String)],
     ) -> Result<Value, GraphError> {
-        self.ensure_mutation_input(endpoint)?;
+        let credential = self.ensure_mutation_input(endpoint)?;
         let body = encode_mutation_params(form)?;
         let url = format!("{}/{}", self.api_base, endpoint.trim_matches('/'));
 
         tokio::time::timeout(TOTAL_MUTATION_TIMEOUT, async {
             let response = self
-                .request(Method::POST, url)
+                .request(Method::POST, url, &credential)
                 .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
                 .body(body)
                 .send()
                 .await
                 .map_err(|error| public_transport_error(&error))?;
-            self.parse_mutation_response(response).await
+            self.parse_mutation_response(response, &credential).await
         })
         .await
         .unwrap_or_else(|_| {
@@ -235,7 +493,7 @@ impl GraphClient {
         endpoint: &str,
         query: &[(String, String)],
     ) -> Result<Value, GraphError> {
-        self.ensure_mutation_input(endpoint)?;
+        let credential = self.ensure_mutation_input(endpoint)?;
         let encoded_query = encode_mutation_params(query)?;
         let mut url = format!("{}/{}", self.api_base, endpoint.trim_matches('/'));
         if !encoded_query.is_empty() {
@@ -245,11 +503,11 @@ impl GraphClient {
 
         tokio::time::timeout(TOTAL_MUTATION_TIMEOUT, async {
             let response = self
-                .request(Method::DELETE, url)
+                .request(Method::DELETE, url, &credential)
                 .send()
                 .await
                 .map_err(|error| public_transport_error(&error))?;
-            self.parse_mutation_response(response).await
+            self.parse_mutation_response(response, &credential).await
         })
         .await
         .unwrap_or_else(|_| {
@@ -295,7 +553,7 @@ impl GraphClient {
         files: Vec<UploadFile>,
         text_fields: Vec<(String, String)>,
     ) -> Result<Value, GraphError> {
-        self.ensure_mutation_input(endpoint)?;
+        let credential = self.ensure_mutation_input(endpoint)?;
         if files.is_empty() || files.len() > 2 || !valid_upload_text_fields(&text_fields) {
             return Err(GraphError::InvalidQuery);
         }
@@ -345,13 +603,13 @@ impl GraphClient {
 
         tokio::time::timeout(TOTAL_UPLOAD_TIMEOUT, async {
             let response = self
-                .request(Method::POST, url)
+                .request(Method::POST, url, &credential)
                 .multipart(form)
                 .timeout(TOTAL_UPLOAD_TIMEOUT)
                 .send()
                 .await
                 .map_err(|error| public_transport_error(&error))?;
-            self.parse_mutation_response(response).await
+            self.parse_mutation_response(response, &credential).await
         })
         .await
         .unwrap_or_else(|_| {
@@ -383,9 +641,18 @@ impl GraphClient {
         url: &str,
         query: &[(String, String)],
         preserve_page_token: bool,
+        credential: &UsedCredential,
     ) -> Result<Value, GraphError> {
+        // The caller wraps this loop in TOTAL_GET_TIMEOUT; never start a pause
+        // that the outer timeout would cut short.
+        let deadline = Instant::now() + TOTAL_GET_TIMEOUT;
         for attempt in 0..=MAX_RETRIES {
-            let response = match self.request(Method::GET, url).query(query).send().await {
+            let response = match self
+                .request(Method::GET, url, credential)
+                .query(query)
+                .send()
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => {
                     if retry_get_transport(&error, attempt).await {
@@ -396,14 +663,8 @@ impl GraphClient {
             };
 
             let status = response.status();
-            let retry_after = response
-                .headers()
-                .get(RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok())
-                .map(|seconds| Duration::from_secs(seconds.min(30)));
             let parsed = match self
-                .parse_graph_response(response, preserve_page_token)
+                .parse_graph_response(response, preserve_page_token, credential)
                 .await
             {
                 Ok(parsed) => parsed,
@@ -420,57 +681,83 @@ impl GraphClient {
                 }
             };
 
-            if parsed.retryable && attempt < MAX_RETRIES {
-                let delay = retry_after.unwrap_or_else(|| retry_delay(attempt));
+            if !parsed.retryable {
+                return finish_graph_response(parsed, None);
+            }
+            let rate_limited = parsed.rate_limit_scope().is_some();
+            let delay = parsed
+                .retry_hint()
+                .unwrap_or_else(|| backoff_delay(attempt, rate_limited, parsed.usage.usage_pct));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if attempt >= MAX_RETRIES || delay > MAX_RETRY_WAIT || delay >= remaining {
+                // Report how long Meta needs instead of silently giving up.
+                let retry_after = (rate_limited || parsed.retry_hint().is_some()).then_some(delay);
                 tracing::warn!(
                     status = status.as_u16(),
                     graph_code = parsed.graph_code,
                     attempt = attempt + 1,
                     delay_ms = delay.as_millis(),
-                    "retrying Meta request"
+                    "Meta request still throttled after the retry budget"
                 );
-                tokio::time::sleep(delay).await;
-                continue;
+                return finish_graph_response(parsed, retry_after);
             }
-
-            return finish_graph_response(parsed);
+            tracing::warn!(
+                status = status.as_u16(),
+                graph_code = parsed.graph_code,
+                graph_subcode = parsed.graph_subcode,
+                usage_pct = parsed.usage.usage_pct,
+                attempt = attempt + 1,
+                delay_ms = delay.as_millis(),
+                "retrying Meta request"
+            );
+            tokio::time::sleep(delay).await;
         }
 
         unreachable!("bounded retry loop always returns")
     }
 
-    fn ensure_mutation_input(&self, endpoint: &str) -> Result<(), GraphError> {
-        if !self.authenticated.load(Ordering::Acquire) {
-            return Err(GraphError::NotAuthenticated);
-        }
+    fn ensure_mutation_input(&self, endpoint: &str) -> Result<UsedCredential, GraphError> {
+        let credential = self.current_credential()?;
         if !valid_endpoint(endpoint) {
             return Err(GraphError::InvalidEndpoint);
         }
-        Ok(())
+        Ok(credential)
     }
 
     async fn parse_mutation_response(
         &self,
         response: reqwest::Response,
+        credential: &UsedCredential,
     ) -> Result<Value, GraphError> {
-        let parsed =
-            self.parse_graph_response(response, false)
-                .await
-                .map_err(|error| match error {
-                    ResponseReadError::TooLarge => GraphError::ResponseTooLarge {
-                        limit: MAX_RESPONSE_BYTES,
-                    },
-                    ResponseReadError::Transport(error) => public_transport_error(&error),
-                })?;
-        finish_graph_response(parsed)
+        let parsed = self
+            .parse_graph_response(response, false, credential)
+            .await
+            .map_err(|error| match error {
+                ResponseReadError::TooLarge => GraphError::ResponseTooLarge {
+                    limit: MAX_RESPONSE_BYTES,
+                },
+                ResponseReadError::Transport(error) => public_transport_error(&error),
+            })?;
+        // Writes are never retried, but the caller still learns how long Meta
+        // asked it to wait before verifying and resubmitting.
+        let retry_after = parsed.retry_hint();
+        finish_graph_response(parsed, retry_after)
     }
 
     async fn parse_graph_response(
         &self,
         response: reqwest::Response,
         preserve_page_token: bool,
+        credential: &UsedCredential,
     ) -> Result<ParsedGraphResponse, ResponseReadError> {
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|seconds| Duration::from_secs(seconds.min(MAX_REPORTED_WAIT_SECONDS)));
+        let usage = UsageHeaders::from_headers(response.headers());
         let body = read_bounded(response).await?;
         let mut payload = serde_json::from_slice::<Value>(&body).ok();
         if !preserve_page_token
@@ -484,21 +771,25 @@ impl GraphClient {
             .as_ref()
             .and_then(|value| value.pointer("/error/code"))
             .and_then(serde_json::Value::as_i64);
+        let graph_subcode = payload
+            .as_ref()
+            .and_then(|value| value.pointer("/error/error_subcode"))
+            .and_then(serde_json::Value::as_i64);
         // Code 10 denies this operation's permissions; it does not invalidate
         // a token that may still authorize other accounts or endpoints.
         let auth_error = matches!(graph_code, Some(102 | 190));
         if auth_error {
-            self.authenticated.store(false, Ordering::Release);
-            if self.cache_backed {
-                invalidate_cached_token();
-            }
+            self.reject_credential(credential);
         }
 
         Ok(ParsedGraphResponse {
             status,
             payload,
             graph_code,
+            graph_subcode,
             retryable: !auth_error && retryable_response(status, graph_code),
+            retry_after,
+            usage,
         })
     }
 }
@@ -510,7 +801,178 @@ struct ParsedGraphResponse {
     status: StatusCode,
     payload: Option<Value>,
     graph_code: Option<i64>,
+    graph_subcode: Option<i64>,
     retryable: bool,
+    retry_after: Option<Duration>,
+    usage: UsageHeaders,
+}
+
+impl ParsedGraphResponse {
+    fn rate_limit_scope(&self) -> Option<&'static str> {
+        if self.status.is_success() {
+            return None;
+        }
+        rate_limit_scope(self.graph_code, self.graph_subcode).or_else(|| {
+            (self.status == StatusCode::TOO_MANY_REQUESTS)
+                .then(|| self.usage.scope.unwrap_or("http"))
+        })
+    }
+
+    /// The pause Meta itself asked for, if any: an explicit `Retry-After`, or
+    /// for a throttled request the regain estimate from its usage headers.
+    fn retry_hint(&self) -> Option<Duration> {
+        let throttled = self.rate_limit_scope().is_some();
+        let usage_wait = throttled
+            .then_some(self.usage.regain_seconds)
+            .flatten()
+            .filter(|seconds| *seconds > 0)
+            .map(Duration::from_secs);
+        match (self.retry_after, usage_wait) {
+            (Some(header), Some(usage)) => Some(header.max(usage)),
+            (header, usage) => header.or(usage),
+        }
+    }
+}
+
+/// Utilisation reported by Meta's throttling headers.
+///
+/// * `X-Business-Use-Case-Usage`: per business use case `call_count`,
+///   `total_time`, `total_cputime` (percent) and
+///   `estimated_time_to_regain_access` (minutes).
+/// * `X-Ad-Account-Usage`: `acc_id_util_pct` and `reset_time_duration` (seconds).
+/// * `X-FB-Ads-Insights-Throttle`: `app_id_util_pct` and `acc_id_util_pct`.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct UsageHeaders {
+    usage_pct: Option<u32>,
+    scope: Option<&'static str>,
+    business_use_case: Option<String>,
+    regain_seconds: Option<u64>,
+    access_tier: Option<String>,
+}
+
+impl UsageHeaders {
+    fn from_headers(headers: &HeaderMap) -> Self {
+        let json = |name: &str| {
+            headers
+                .get(name)
+                .filter(|value| value.len() <= MAX_USAGE_HEADER_BYTES)
+                .and_then(|value| serde_json::from_slice::<Value>(value.as_bytes()).ok())
+        };
+        let mut usage = Self::default();
+
+        if let Some(Value::Object(owners)) = json("x-business-use-case-usage") {
+            for entry in owners
+                .values()
+                .filter_map(Value::as_array)
+                .flatten()
+                .take(64)
+            {
+                let pct = ["call_count", "total_time", "total_cputime"]
+                    .into_iter()
+                    .filter_map(|key| usage_percentage(entry.get(key)))
+                    .max();
+                let regain = entry
+                    .get("estimated_time_to_regain_access")
+                    .and_then(Value::as_f64)
+                    .filter(|minutes| minutes.is_finite() && *minutes > 0.0)
+                    .map(|minutes| ((minutes * 60.0).ceil() as u64).min(MAX_REPORTED_WAIT_SECONDS));
+                let use_case = entry
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .and_then(|kind| bounded_identifier(kind, false));
+                if usage.record(pct, "business_use_case") || regain > usage.regain_seconds {
+                    usage.business_use_case = use_case;
+                }
+                usage.regain_seconds = usage.regain_seconds.max(regain);
+                usage.note_tier(entry.get("ads_api_access_tier"));
+            }
+        }
+        if let Some(account) = json("x-ad-account-usage") {
+            usage.record(
+                usage_percentage(account.get("acc_id_util_pct")),
+                "ad_account",
+            );
+            let reset = account
+                .get("reset_time_duration")
+                .and_then(Value::as_f64)
+                .filter(|seconds| seconds.is_finite() && *seconds > 0.0)
+                .map(|seconds| (seconds.ceil() as u64).min(MAX_REPORTED_WAIT_SECONDS));
+            usage.regain_seconds = usage.regain_seconds.max(reset);
+            usage.note_tier(account.get("ads_api_access_tier"));
+        }
+        if let Some(insights) = json("x-fb-ads-insights-throttle") {
+            let pct = ["app_id_util_pct", "acc_id_util_pct"]
+                .into_iter()
+                .filter_map(|key| usage_percentage(insights.get(key)))
+                .max();
+            usage.record(pct, "ads_insights");
+            usage.note_tier(insights.get("ads_api_access_tier"));
+        }
+        usage
+    }
+
+    /// Keep the highest utilisation and remember which header reported it.
+    fn record(&mut self, pct: Option<u32>, scope: &'static str) -> bool {
+        match pct {
+            Some(pct) if self.usage_pct.is_none_or(|current| pct > current) => {
+                self.usage_pct = Some(pct);
+                self.scope = Some(scope);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn note_tier(&mut self, tier: Option<&Value>) {
+        if self.access_tier.is_none() {
+            self.access_tier = tier
+                .and_then(Value::as_str)
+                .and_then(|tier| bounded_identifier(tier, false));
+        }
+    }
+}
+
+fn usage_percentage(value: Option<&Value>) -> Option<u32> {
+    value
+        .and_then(Value::as_f64)
+        .filter(|pct| pct.is_finite() && *pct >= 0.0)
+        .map(|pct| pct.ceil().min(1000.0) as u32)
+}
+
+/// Meta's throttling codes and subcodes, mapped to the limit they enforce.
+///
+/// 4 application, 17 user (subcode 2446079: ad account), 32 Page,
+/// 613 call-rate (subcodes 1487742, 1487632, 4841018, 5044001),
+/// 80000-80014 business use case. 4/1504022 and 4/1504039 are the
+/// Ads Insights platform throttles.
+fn rate_limit_scope(code: Option<i64>, subcode: Option<i64>) -> Option<&'static str> {
+    Some(match (code?, subcode) {
+        (4, Some(1504022 | 1504039)) => "ads_insights",
+        (4, _) => "application",
+        (17, Some(2446079)) => "ad_account",
+        (17, _) => "user",
+        (32, _) => "page",
+        (613, _) => "ad_account",
+        (80000..=80014, _) => "business_use_case",
+        _ => return None,
+    })
+}
+
+/// Pause before retrying a GET when Meta gave no explicit wait.
+///
+/// Throttled requests back off harder, scaled by the reported utilisation, so
+/// a busy account is not pushed further over its limit.
+fn backoff_delay(attempt: u8, rate_limited: bool, usage_pct: Option<u32>) -> Duration {
+    let base = retry_delay(attempt);
+    if !rate_limited {
+        return base;
+    }
+    let factor = match usage_pct {
+        Some(pct) if pct >= 100 => 4,
+        Some(pct) if pct >= 90 => 3,
+        _ => 2,
+    };
+    (base * factor).min(MAX_RETRY_WAIT)
 }
 
 fn valid_endpoint(endpoint: &str) -> bool {
@@ -669,7 +1131,10 @@ async fn read_bounded(mut response: reqwest::Response) -> Result<Vec<u8>, Respon
     Ok(body)
 }
 
-fn finish_graph_response(parsed: ParsedGraphResponse) -> Result<Value, GraphError> {
+fn finish_graph_response(
+    parsed: ParsedGraphResponse,
+    retry_after: Option<Duration>,
+) -> Result<Value, GraphError> {
     if parsed.status.is_success()
         && !parsed
             .payload
@@ -692,6 +1157,14 @@ fn finish_graph_response(parsed: ParsedGraphResponse) -> Result<Value, GraphErro
         return Ok(payload);
     }
 
+    let meta = meta_error_details(&parsed);
+    let retry_after_seconds = retry_after.map(duration_to_reported_seconds);
+    let details = (meta.is_some() || retry_after_seconds.is_some()).then(|| {
+        Box::new(ApiErrorDetails {
+            meta,
+            retry_after_seconds,
+        })
+    });
     Err(GraphError::Api {
         status: parsed.status.as_u16(),
         code: parsed.graph_code,
@@ -699,7 +1172,114 @@ fn finish_graph_response(parsed: ParsedGraphResponse) -> Result<Value, GraphErro
         // only the structured status/code instead of guessing how to redact it.
         message: "request rejected".to_owned(),
         retryable: parsed.retryable,
+        details,
     })
+}
+
+fn duration_to_reported_seconds(duration: Duration) -> u64 {
+    let seconds = duration.as_secs() + u64::from(duration.subsec_nanos() > 0);
+    seconds.clamp(1, MAX_REPORTED_WAIT_SECONDS)
+}
+
+/// Copy only the non-prose fields of Meta's error object, plus a static hint.
+fn meta_error_details(parsed: &ParsedGraphResponse) -> Option<MetaErrorDetails> {
+    let error = parsed
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get("error"))
+        .filter(|error| error.is_object());
+    let rate_limit = parsed.rate_limit_scope().map(|scope| RateLimitDetails {
+        scope: scope.to_owned(),
+        usage_pct: parsed.usage.usage_pct,
+        business_use_case: parsed.usage.business_use_case.clone(),
+        estimated_time_to_regain_access_seconds: parsed.usage.regain_seconds,
+        ads_api_access_tier: parsed.usage.access_tier.clone(),
+    });
+    let details = MetaErrorDetails {
+        code: parsed.graph_code,
+        error_subcode: parsed.graph_subcode,
+        error_type: error
+            .and_then(|error| error.get("type"))
+            .and_then(Value::as_str)
+            .and_then(|kind| bounded_identifier(kind, false)),
+        is_transient: error
+            .and_then(|error| error.get("is_transient"))
+            .and_then(Value::as_bool),
+        fbtrace_id: error
+            .and_then(|error| error.get("fbtrace_id"))
+            .and_then(Value::as_str)
+            .and_then(|trace| bounded_identifier(trace, true)),
+        hint: meta_error_hint(parsed.graph_code, parsed.graph_subcode),
+        rate_limit,
+    };
+    (error.is_some() || details.rate_limit.is_some()).then_some(details)
+}
+
+/// Server-authored guidance for common Marketing API errors, keyed by Meta's
+/// code and subcode. It replaces Meta's prose, which is never forwarded.
+fn meta_error_hint(code: Option<i64>, subcode: Option<i64>) -> Option<&'static str> {
+    Some(match (code?, subcode) {
+        (_, Some(1_885_183)) => {
+            "The promoted post was created by an app in development mode; use a post created by a live app or an existing Page post"
+        }
+        (_, Some(1_885_000..=1_885_999)) => {
+            "Meta rejected the ad creative; check the object_story_spec (Page, link, image hash or video ID, call to action) and that this ad account may use the Page or Instagram account"
+        }
+        (100, Some(33)) => {
+            "The object does not exist, the token cannot see it, or it does not support this operation; verify the ID and the token's access to it"
+        }
+        (100, _) => {
+            "Meta rejected a parameter; check field names, enum values, and ID formats against the Marketing API reference for the pinned Graph version"
+        }
+        (102, _) => "The Meta session is invalid; refresh the access token",
+        (190, Some(463)) => "The access token has expired; refresh it or log in again",
+        (190, Some(460)) => {
+            "The access token was invalidated by a password change or security event; log in again"
+        }
+        (190, Some(458 | 459 | 464 | 467 | 492)) => {
+            "The access token is no longer valid for this app or user; log in again or issue a new system user token"
+        }
+        (190, _) => "Meta rejected the access token; refresh it or log in again",
+        (200..=299, _) => {
+            "The token lacks a permission or asset role this call needs (for example ads_management, ads_read, business_management, or a Page task); grant it and retry"
+        }
+        (10, _) => {
+            "The app or token is not allowed to perform this operation; check the app's access level and the user's role on the asset"
+        }
+        (613, Some(1_487_742)) => "Too many calls from this ad account; wait before retrying",
+        (613, Some(1_487_632)) => {
+            "Ad set budgets can change only 4 times per hour; space out budget changes"
+        }
+        (613, Some(5_044_001)) => {
+            "The ad account exceeded its mutation rate; wait before sending more changes"
+        }
+        (613, Some(4_841_018)) => "Too many concurrent requests; send fewer requests in parallel",
+        (613, None) => {
+            "Meta applied an abuse-prevention limit; check for actions sending excessive requests before retrying"
+        }
+        (613, _) => "Meta throttled this request; wait before retrying",
+        (4 | 17 | 32 | 80_000..=80_014, _) => {
+            "Meta throttled this request; wait for retry_after_seconds when present and reduce request volume"
+        }
+        (2635, _) => {
+            "This call uses a deprecated Graph API version; update the server to a supported Marketing API version"
+        }
+        (1 | 2, _) => "Meta reported a temporary problem; retry later",
+        _ => return None,
+    })
+}
+
+/// Accept short machine identifiers only (error types, access tiers, trace
+/// IDs); anything else is dropped rather than rewritten.
+fn bounded_identifier(value: &str, trace_alphabet: bool) -> Option<String> {
+    (!value.is_empty()
+        && value.len() <= MAX_PROVIDER_TOKEN_CHARS
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || byte == b'_'
+                || (trace_alphabet && matches!(byte, b'-' | b'+' | b'/' | b'='))
+        }))
+    .then(|| value.to_owned())
 }
 
 async fn retry_get_transport(error: &reqwest::Error, attempt: u8) -> bool {
@@ -758,7 +1338,7 @@ fn retryable_response(status: StatusCode, graph_code: Option<i64>) -> bool {
                 | StatusCode::SERVICE_UNAVAILABLE
                 | StatusCode::GATEWAY_TIMEOUT
         )
-        || matches!(graph_code, Some(4 | 17 | 32 | 613))
+        || matches!(graph_code, Some(4 | 17 | 32 | 613 | 80000..=80014))
 }
 
 fn retry_delay(attempt: u8) -> Duration {
@@ -874,10 +1454,52 @@ mod tests {
 
     use crate::{config::MetaConfig, error::GraphError};
 
-    use super::{
-        GraphClient, retry_delay, retryable_response, sanitize_payload, valid_endpoint,
-        valid_query, valid_upload_file_name, valid_upload_mime_type, valid_upload_text_fields,
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     };
+
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    use crate::config::TokenOrigin;
+
+    use super::{
+        CredentialSource, GraphClient, MAX_RETRY_WAIT, TokenDigest, UsageHeaders, backoff_delay,
+        meta_error_hint, rate_limit_scope, retry_delay, retryable_response, sanitize_payload,
+        token_digest, valid_endpoint, valid_query, valid_upload_file_name, valid_upload_mime_type,
+        valid_upload_text_fields,
+    };
+
+    async fn respond(socket: &mut TcpStream, status: &str, headers: &str, body: &str) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        socket.write_all(response.as_bytes()).await.unwrap();
+    }
+
+    #[derive(Default)]
+    struct TestCredentialSource {
+        environment: Mutex<Option<String>>,
+        cache: Mutex<Option<String>>,
+        discarded: Mutex<Vec<TokenDigest>>,
+        cache_reads: AtomicUsize,
+    }
+
+    impl CredentialSource for TestCredentialSource {
+        fn environment_token(&self) -> Option<String> {
+            self.environment.lock().unwrap().clone()
+        }
+
+        fn cached_token(&self) -> Option<String> {
+            self.cache_reads.fetch_add(1, Ordering::SeqCst);
+            self.cache.lock().unwrap().clone()
+        }
+
+        fn discard_cached(&self, rejected: &TokenDigest) {
+            self.discarded.lock().unwrap().push(*rejected);
+        }
+    }
 
     async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
         let mut request = Vec::with_capacity(2 * 1024);
@@ -1354,8 +1976,15 @@ mod tests {
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
             let _request = read_http_request(&mut socket).await;
-            let response = json!({"error": {"code": 100, "message":
-                "Rejected private-form-value; https://example.test/#access_token=response-secret; {\"token\":\"nested-secret\"}; person@example.test"
+            let response = json!({"error": {
+                "code": 100,
+                "error_subcode": 1_487_390,
+                "type": "OAuthException",
+                "message": "Rejected private-form-value; https://example.test/#access_token=response-secret; {\"token\":\"nested-secret\"}; person@example.test",
+                "error_user_title": "Name private-form-value rejected",
+                "error_user_msg": "Contact person@example.test about private-form-value",
+                "is_transient": false,
+                "fbtrace_id": "AbCdEf123_-+/="
             }}).to_string();
             let headers = format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1388,7 +2017,395 @@ mod tests {
             public.message,
             "Meta API error 100 (HTTP 400): request rejected"
         );
+        assert_eq!(public.code, "META_API_ERROR");
+        let meta = public.details.meta.as_ref().unwrap();
+        assert_eq!(meta.code, Some(100));
+        assert_eq!(meta.error_subcode, Some(1_487_390));
+        assert_eq!(meta.error_type.as_deref(), Some("OAuthException"));
+        assert_eq!(meta.fbtrace_id.as_deref(), Some("AbCdEf123_-+/="));
+        assert_eq!(meta.is_transient, Some(false));
+        assert!(meta.hint.unwrap().starts_with("Meta rejected a parameter"));
+        assert!(public.details.retry_after_seconds.is_none());
+        let serialized = serde_json::to_string(&public).unwrap();
+        for private in [
+            "private-form-value",
+            "response-secret",
+            "nested-secret",
+            "person@example.test",
+        ] {
+            assert!(!serialized.contains(private), "{private} leaked");
+        }
         server.await.unwrap();
+    }
+
+    #[test]
+    fn static_hints_cover_common_marketing_api_errors() {
+        let hint = |code, subcode| meta_error_hint(Some(code), subcode).unwrap();
+        assert!(hint(100, Some(33)).contains("does not exist"));
+        assert!(hint(100, Some(1_885_183)).contains("development mode"));
+        assert!(hint(100, Some(1_885_650)).contains("ad creative"));
+        assert!(hint(190, Some(463)).contains("expired"));
+        assert!(hint(190, None).contains("access token"));
+        assert!(hint(200, None).contains("permission"));
+        assert!(hint(10, None).contains("not allowed"));
+        assert!(hint(613, Some(1_487_742)).contains("ad account"));
+        assert!(hint(613, Some(1_487_632)).contains("4 times per hour"));
+        assert!(hint(613, Some(5_044_001)).contains("mutation rate"));
+        assert!(hint(613, Some(4_841_018)).contains("concurrent"));
+        assert!(hint(613, None).contains("abuse-prevention"));
+        assert!(hint(80_004, None).contains("throttled"));
+        assert!(hint(2635, None).contains("deprecated"));
+        assert_eq!(meta_error_hint(Some(1_234_567), None), None);
+        assert_eq!(meta_error_hint(None, Some(33)), None);
+    }
+
+    #[test]
+    fn parses_meta_usage_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-business-use-case-usage",
+            HeaderValue::from_static(
+                r#"{"123":[{"type":"ads_management","call_count":40,"total_cputime":12,"total_time":20,"estimated_time_to_regain_access":0},{"type":"ads_insights","call_count":101,"total_cputime":30,"total_time":40,"estimated_time_to_regain_access":7,"ads_api_access_tier":"standard_access"}]}"#,
+            ),
+        );
+        headers.insert(
+            "x-ad-account-usage",
+            HeaderValue::from_static(
+                r#"{"acc_id_util_pct":64.2,"reset_time_duration":30,"ads_api_access_tier":"standard_access"}"#,
+            ),
+        );
+        headers.insert(
+            "x-fb-ads-insights-throttle",
+            HeaderValue::from_static(r#"{"app_id_util_pct":12.5,"acc_id_util_pct":99}"#),
+        );
+        assert_eq!(
+            UsageHeaders::from_headers(&headers),
+            UsageHeaders {
+                usage_pct: Some(101),
+                scope: Some("business_use_case"),
+                business_use_case: Some("ads_insights".to_owned()),
+                regain_seconds: Some(420),
+                access_tier: Some("standard_access".to_owned()),
+            }
+        );
+
+        let mut account_only = HeaderMap::new();
+        account_only.insert(
+            "x-ad-account-usage",
+            HeaderValue::from_static(r#"{"acc_id_util_pct":100,"reset_time_duration":95.5}"#),
+        );
+        account_only.insert(
+            "x-fb-ads-insights-throttle",
+            HeaderValue::from_static("not json"),
+        );
+        let usage = UsageHeaders::from_headers(&account_only);
+        assert_eq!(usage.usage_pct, Some(100));
+        assert_eq!(usage.scope, Some("ad_account"));
+        assert_eq!(usage.regain_seconds, Some(96));
+        assert_eq!(
+            UsageHeaders::from_headers(&HeaderMap::new()),
+            UsageHeaders::default()
+        );
+    }
+
+    #[test]
+    fn recognises_meta_rate_limit_codes() {
+        for (code, subcode, scope) in [
+            (613, Some(5_044_001), "ad_account"),
+            (613, Some(4_841_018), "ad_account"),
+            (613, Some(1_487_632), "ad_account"),
+            (613, None, "ad_account"),
+            (17, Some(2_446_079), "ad_account"),
+            (17, None, "user"),
+            (4, Some(1_504_022), "ads_insights"),
+            (4, None, "application"),
+            (32, None, "page"),
+            (80000, None, "business_use_case"),
+            (80014, Some(2_446_079), "business_use_case"),
+        ] {
+            assert_eq!(rate_limit_scope(Some(code), subcode), Some(scope), "{code}");
+            assert!(retryable_response(
+                reqwest::StatusCode::BAD_REQUEST,
+                Some(code)
+            ));
+        }
+        for code in [Some(100), Some(190), Some(79_999), Some(80_015), None] {
+            assert_eq!(rate_limit_scope(code, None), None);
+        }
+        assert!(!retryable_response(
+            reqwest::StatusCode::BAD_REQUEST,
+            Some(80_015)
+        ));
+    }
+
+    #[test]
+    fn throttled_backoff_scales_with_reported_usage() {
+        assert_eq!(backoff_delay(0, false, Some(100)).as_secs(), 1);
+        assert_eq!(backoff_delay(0, true, None).as_secs(), 2);
+        assert_eq!(backoff_delay(1, true, Some(92)).as_secs(), 6);
+        assert_eq!(backoff_delay(2, true, Some(100)).as_secs(), 16);
+        assert_eq!(backoff_delay(3, true, Some(100)), MAX_RETRY_WAIT);
+    }
+
+    #[tokio::test]
+    async fn retries_a_throttled_get_after_metas_retry_after() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut socket).await;
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "Retry-After: 1\r\nX-Ad-Account-Usage: {\"acc_id_util_pct\":97}\r\n",
+                r#"{"error":{"code":613,"error_subcode":1487632,"message":"Calls to this api have exceeded the rate limit."}}"#,
+            )
+            .await;
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut socket).await;
+            respond(&mut socket, "200 OK", "", r#"{"data":[]}"#).await;
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("test-access-token-1234567890"),
+        ))
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let payload = graph.get_json("act_1/campaigns", &[]).await.unwrap();
+        assert_eq!(payload, json!({"data": []}));
+        assert!(started.elapsed() >= std::time::Duration::from_secs(1));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn returns_retry_after_when_metas_wait_exceeds_the_retry_budget() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut socket).await;
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "X-Business-Use-Case-Usage: {\"42\":[{\"type\":\"ads_insights\",\"call_count\":100,\"total_cputime\":35,\"total_time\":61,\"estimated_time_to_regain_access\":5,\"ads_api_access_tier\":\"development_access\"}]}\r\n",
+                r#"{"error":{"code":80000,"error_subcode":2446079,"message":"There have been too many calls from this ad-account.","type":"OAuthException","fbtrace_id":"Trace01"}}"#,
+            )
+            .await;
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+                .await
+                .is_ok()
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("test-access-token-1234567890"),
+        ))
+        .unwrap();
+
+        let started = tokio::time::Instant::now();
+        let error = graph.get_json("act_42/insights", &[]).await.unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        assert!(!server.await.unwrap(), "GET retried despite a long wait");
+        let public = crate::error::PublicError::from(error);
+        assert_eq!(public.code, "RATE_LIMITED");
+        assert!(public.retryable);
+        assert_eq!(public.details.retry_after_seconds, Some(300));
+        assert!(public.action.as_deref().unwrap().contains("300 seconds"));
+        let meta = public.details.meta.as_ref().unwrap();
+        assert_eq!(meta.code, Some(80000));
+        assert_eq!(meta.error_subcode, Some(2_446_079));
+        assert_eq!(meta.fbtrace_id.as_deref(), Some("Trace01"));
+        let rate_limit = meta.rate_limit.as_ref().unwrap();
+        assert_eq!(rate_limit.scope, "business_use_case");
+        assert_eq!(rate_limit.usage_pct, Some(100));
+        assert_eq!(
+            rate_limit.business_use_case.as_deref(),
+            Some("ads_insights")
+        );
+        assert_eq!(
+            rate_limit.estimated_time_to_regain_access_seconds,
+            Some(300)
+        );
+        assert_eq!(
+            rate_limit.ads_api_access_tier.as_deref(),
+            Some("development_access")
+        );
+    }
+
+    #[tokio::test]
+    async fn throttled_write_reports_the_wait_without_retrying() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut socket).await;
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "X-Ad-Account-Usage: {\"acc_id_util_pct\":100,\"reset_time_duration\":120}\r\n",
+                r#"{"error":{"code":17,"error_subcode":2446079,"message":"User request limit reached"}}"#,
+            )
+            .await;
+            tokio::time::timeout(std::time::Duration::from_millis(300), listener.accept())
+                .await
+                .is_ok()
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("test-access-token-1234567890"),
+        ))
+        .unwrap();
+
+        let error = graph
+            .post_form_json("act_1/campaigns", &[("name".to_owned(), "x".to_owned())])
+            .await
+            .unwrap_err();
+        assert!(!server.await.unwrap(), "mutation was sent more than once");
+        let public = crate::mutation_result::mutation_error_without_blind_retry(
+            error,
+            "Verify the campaign list before retrying",
+        );
+        assert_eq!(public.code, "RATE_LIMITED");
+        assert!(!public.retryable);
+        assert_eq!(public.details.retry_after_seconds, Some(120));
+        let rate_limit = public.details.meta.unwrap().rate_limit.unwrap();
+        assert_eq!(rate_limit.scope, "ad_account");
+        assert_eq!(rate_limit.usage_pct, Some(100));
+    }
+
+    #[tokio::test]
+    async fn rejected_token_is_replaced_by_a_refreshed_one_without_restart() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for (bearer, status, body) in [
+                (
+                    "old-token-1234567890abcdef",
+                    "401 Unauthorized",
+                    r#"{"error":{"code":190,"error_subcode":463,"type":"OAuthException","message":"Error validating access token: Session has expired"}}"#,
+                ),
+                ("new-token-1234567890abcdef", "200 OK", r#"{"id":"7"}"#),
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                assert!(request.contains(&format!("authorization: bearer {bearer}\r\n")));
+                respond(&mut socket, status, "", body).await;
+            }
+            tokio::time::timeout(std::time::Duration::from_millis(200), listener.accept())
+                .await
+                .is_ok()
+        });
+        let source = Arc::new(TestCredentialSource::default());
+        // A running process keeps seeing the environment it started with.
+        *source.environment.lock().unwrap() = Some("old-token-1234567890abcdef".to_owned());
+        let graph = GraphClient::with_credential_source(
+            &MetaConfig::for_test(
+                format!("http://{address}"),
+                Some("old-token-1234567890abcdef"),
+            ),
+            source.clone(),
+        )
+        .unwrap();
+
+        let expired = crate::error::PublicError::from(graph.get_json("me", &[]).await.unwrap_err());
+        assert_eq!(expired.code, "AUTH_EXPIRED");
+        assert_eq!(
+            expired
+                .details
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.error_subcode),
+            Some(463)
+        );
+
+        // Nothing new to load: fail clearly without calling Meta again.
+        let still_expired = graph.post_form_json("me", &[]).await.unwrap_err();
+        assert!(matches!(still_expired, GraphError::AuthExpired));
+        let public = crate::error::PublicError::from(still_expired);
+        assert_eq!(public.code, "AUTH_EXPIRED");
+        assert!(public.action.unwrap().contains("re-reads"));
+        assert!(source.discarded.lock().unwrap().is_empty());
+
+        // `--login` in another terminal refreshes the cache; no restart needed.
+        *source.cache.lock().unwrap() = Some("new-token-1234567890abcdef".to_owned());
+        let reads_before = source.cache_reads.load(Ordering::SeqCst);
+        assert_eq!(graph.get_json("me", &[]).await.unwrap()["id"], "7");
+        assert_eq!(source.cache_reads.load(Ordering::SeqCst), reads_before + 1);
+        assert!(!server.await.unwrap(), "an expired token was sent again");
+        assert!(format!("{graph:?}").contains("authenticated: true"));
+        assert!(!format!("{graph:?}").contains("new-token"));
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_cached_token_discards_only_that_cache_entry() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let _request = read_http_request(&mut socket).await;
+            respond(
+                &mut socket,
+                "400 Bad Request",
+                "",
+                r#"{"error":{"code":102,"message":"Session key invalid"}}"#,
+            )
+            .await;
+        });
+        let source = Arc::new(TestCredentialSource::default());
+        let mut config = MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("cached-token-1234567890abcd"),
+        );
+        config.token_origin = Some(TokenOrigin::Cache);
+        let graph = GraphClient::with_credential_source(&config, source.clone()).unwrap();
+
+        assert!(graph.get_json("me", &[]).await.is_err());
+        assert_eq!(
+            *source.discarded.lock().unwrap(),
+            vec![token_digest("cached-token-1234567890abcd")]
+        );
+        assert!(matches!(
+            graph.get_json("me", &[]).await,
+            Err(GraphError::AuthExpired)
+        ));
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn a_stale_rejection_never_retires_a_newer_token() {
+        let source = Arc::new(TestCredentialSource::default());
+        let graph = GraphClient::with_credential_source(
+            &MetaConfig::for_test("http://127.0.0.1:9", Some("current-token-1234567890ab")),
+            source,
+        )
+        .unwrap();
+        let super::Credential::User(user) = &graph.credential else {
+            panic!("expected a user credential");
+        };
+        user.reject(token_digest("previous-token-1234567890ab"));
+        assert!(graph.current_credential().is_ok());
+        user.reject(token_digest("current-token-1234567890ab"));
+        assert!(matches!(
+            graph.current_credential(),
+            Err(GraphError::AuthExpired)
+        ));
+    }
+
+    #[test]
+    fn unconfigured_clients_pick_up_a_token_written_later() {
+        let source = Arc::new(TestCredentialSource::default());
+        let graph = GraphClient::with_credential_source(
+            &MetaConfig::for_test("http://127.0.0.1:9", None),
+            source.clone(),
+        )
+        .unwrap();
+        assert!(matches!(
+            graph.current_credential(),
+            Err(GraphError::NotAuthenticated)
+        ));
+        *source.cache.lock().unwrap() = Some("later-token-1234567890abcd".to_owned());
+        assert!(graph.current_credential().is_ok());
     }
 
     #[tokio::test]

@@ -1571,6 +1571,7 @@ fn plan_error(message: &str, action: &str) -> PublicError {
         message: message.to_owned(),
         retryable: false,
         action: Some(action.to_owned()),
+        details: Default::default(),
     }
 }
 
@@ -1580,6 +1581,7 @@ fn internal_error(message: &str) -> PublicError {
         message: message.to_owned(),
         retryable: false,
         action: Some("Restart the local MCP server if the problem persists".to_owned()),
+        details: Default::default(),
     }
 }
 
@@ -1591,6 +1593,7 @@ fn ambiguous_result() -> PublicError {
         action: Some(
             "Read the target from Meta and reconcile it before building another plan".to_owned(),
         ),
+        details: Default::default(),
     }
 }
 

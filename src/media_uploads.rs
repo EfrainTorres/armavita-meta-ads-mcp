@@ -543,6 +543,7 @@ pub(crate) async fn open_local_media(
         message: "Local media uploads are not configured".to_owned(),
         retryable: false,
         action: Some("Set META_MEDIA_ROOT to the one directory allowed for uploads".to_owned()),
+        details: Default::default(),
     })?;
     if !root.is_absolute() {
         return Err(PublicError::invalid_input(
@@ -855,6 +856,7 @@ fn unsafe_video_url() -> PublicError {
 fn remote_video_error(error: GraphError) -> PublicError {
     match error {
         GraphError::NotAuthenticated
+        | GraphError::AuthExpired
         | GraphError::PageAccessRequired
         | GraphError::InvalidEndpoint
         | GraphError::InvalidQuery
@@ -997,6 +999,7 @@ mod tests {
             code: Some(10),
             message: "Rejected https://cdn.example/video.mp4?signature=private".to_owned(),
             retryable: false,
+            details: None,
         });
         assert_eq!(error.code, "VIDEO_UPLOAD_UNCONFIRMED");
         assert!(!error.message.contains("signature"));
