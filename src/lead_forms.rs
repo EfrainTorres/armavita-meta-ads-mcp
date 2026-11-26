@@ -578,7 +578,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "create_lead_form",
-        description = "Create an Instant Form on a Page using bounded v26 questions, privacy policy, thank-you page and quality settings. Requires Page advertising access; content changes require a new form.",
+        description = "Create an Instant Form on a Page using bounded v27 questions, privacy policy, thank-you page and quality settings. Requires Page advertising access; content changes require a new form.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
