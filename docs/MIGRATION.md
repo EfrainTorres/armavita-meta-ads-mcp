@@ -1,6 +1,6 @@
 # Moving from Python
 
-The Rust version keeps the main advertising workflows and expands to 125 tools, compared with 78 in
+The Rust version keeps the main advertising workflows and expands to 128 tools, compared with 78 in
 [Python 1.2.0](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/102f07fefa35dc94af5a00661ac51cfc16b63155).
 Both versions use local stdio and AGPLv3-only licensing. Some inputs and results have changed,
 including for tools whose names stayed the same.

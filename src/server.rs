@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::engagement_audiences_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1644,6 +1645,7 @@ mod tests {
             names,
             [
                 "apply_mutation_plan",
+                "audit_audiences",
                 "batch_catalog_items",
                 "batch_products",
                 "build_mutation_plan",
@@ -1660,6 +1662,7 @@ mod tests {
                 "create_campaign_budget_schedule",
                 "create_custom_audience",
                 "create_custom_conversion",
+                "create_engagement_audience",
                 "create_feed_error_report",
                 "create_insights_job",
                 "create_lead_form",
@@ -1676,6 +1679,7 @@ mod tests {
                 "delete_custom_conversion",
                 "delete_test_lead",
                 "discard_mutation_plan",
+                "ensure_audience_set",
                 "estimate_audience_size",
                 "generate_creative_previews",
                 "get_account_controls",
@@ -1799,6 +1803,7 @@ mod tests {
                 | "create_campaign_budget_schedule"
                 | "create_custom_audience"
                 | "create_custom_conversion"
+                | "create_engagement_audience"
                 | "create_insights_job"
                 | "create_lookalike_audience"
                 | "create_reach_frequency_prediction"
@@ -1862,6 +1867,7 @@ mod tests {
                 | "update_campaign"
                 | "update_custom_audience"
                 | "update_custom_conversion"
+                | "ensure_audience_set"
                 | "upsert_product" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(false));
@@ -1887,7 +1893,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 128);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();
