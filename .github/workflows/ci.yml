@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [rust]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: fmt, clippy, test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      # rust-toolchain.toml pins 1.98.0 with clippy and rustfmt.
+      - name: Install toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets
+      - name: Test
+        run: cargo test --locked
+
+  windows-gnu:
+    name: Windows x64 binary (cross, gnu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install cross toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mingw-w64 cmake nasm
+          rustup target add x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-gnu
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-gnu
+      - name: Checksum
+        run: |
+          cd target/x86_64-pc-windows-gnu/release
+          sha256sum armavita-meta-ads-mcp.exe > armavita-meta-ads-mcp.exe.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: armavita-meta-ads-mcp-windows-x64
+          path: |
+            target/x86_64-pc-windows-gnu/release/armavita-meta-ads-mcp.exe
+            target/x86_64-pc-windows-gnu/release/armavita-meta-ads-mcp.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
