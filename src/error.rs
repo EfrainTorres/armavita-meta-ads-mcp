@@ -145,6 +145,9 @@ fn format_meta_error(status: u16, code: Option<i64>) -> String {
 
 #[derive(Debug, Serialize, JsonSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
+// Both variants are objects. Saying so at the root keeps `outputSchema` for peers
+// on protocols before 2026-07-28, which drop schemas whose root is not an object.
+#[schemars(extend("type" = "object"))]
 pub enum ToolResponse<T> {
     Success { data: T },
     Error { error: PublicError },

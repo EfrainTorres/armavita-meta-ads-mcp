@@ -1923,6 +1923,31 @@ mod tests {
     }
 
     #[test]
+    fn output_schemas_survive_for_peers_before_2026_07_28() {
+        use rmcp::model::{ListToolsResult, ServerResult};
+
+        let tools = server().tool_definitions();
+        let with_schema = tools
+            .iter()
+            .filter(|tool| tool.output_schema.is_some())
+            .count();
+        let mut result = ServerResult::ListToolsResult(ListToolsResult::with_all_items(tools));
+        result.strip_non_object_output_for_legacy_peer();
+        let ServerResult::ListToolsResult(result) = result else {
+            unreachable!()
+        };
+        let kept = result
+            .tools
+            .iter()
+            .filter(|tool| tool.output_schema.is_some())
+            .count();
+        assert_eq!(
+            kept, with_schema,
+            "older peers must keep every outputSchema"
+        );
+    }
+
+    #[test]
     fn public_input_schemas_are_closed_and_required_arrays_are_bounded() {
         let tools = MetaAdsServer::new(MetaConfig::for_test(
             "https://graph.facebook.com/v26.0",
