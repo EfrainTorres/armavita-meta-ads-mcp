@@ -6,7 +6,7 @@ We built this for fast startup, low memory use, and broad advertising coverage i
 **125 tools** cover campaigns, reporting, lead forms, catalogs, audiences, and more, with compact
 responses and safeguards for sensitive changes. Related actions share tools to keep the list manageable.
 
-It runs as a single executable with no Python environment to maintain and uses Meta Marketing API v26.
+It runs as a single executable with no Python environment to maintain and uses Meta Marketing API v27.
 
 **Rust 2.0 release candidate:** smoke tested and heavily used internally.
 Please [report any issues](https://github.com/EfrainTorres/armavita-meta-ads-mcp/issues) you run into.

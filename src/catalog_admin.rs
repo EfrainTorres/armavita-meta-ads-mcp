@@ -608,7 +608,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "write_catalog_object",
-        description = "Create or update a catalog, product set, feed, feed rule, schedule, group, or supported item. Fields follow Graph v26; creation may duplicate objects. Feed deletion requires explicit acknowledgement.",
+        description = "Create or update a catalog, product set, feed, feed rule, schedule, group, or supported item. Fields follow Graph v27; creation may duplicate objects. Feed deletion requires explicit acknowledgement.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,

@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::auth::load_cached_access_token;
 
-pub(crate) const DEFAULT_GRAPH_API_VERSION: &str = "v26.0";
+pub(crate) const DEFAULT_GRAPH_API_VERSION: &str = "v27.0";
 pub(crate) const MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
 pub(crate) const MAX_RETRIES: u8 = 3;
 pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn graph_version_is_pinned_to_the_audited_contract() {
-        assert_eq!(DEFAULT_GRAPH_API_VERSION, "v26.0");
+        assert_eq!(DEFAULT_GRAPH_API_VERSION, "v27.0");
     }
 
     #[test]
