@@ -9,6 +9,9 @@
 //! Optional: `META_SMOKE_AD_ACCOUNT_ID=act_123` picks the account; otherwise the first
 //! listed account is used. The test only calls read tools and prints no response bodies.
 
+// Test helpers outside #[test] functions unwrap and panic freely; failures fail the test.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
 use std::{fs, path::Path, process::Stdio};
 
 use rmcp::{
