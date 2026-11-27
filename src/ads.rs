@@ -243,7 +243,7 @@ fn validate_list_input(input: ListAdsInput) -> Result<ValidatedListAds, PublicEr
         (Some(ad_set_id), None) => format!("{ad_set_id}/ads"),
         (None, Some(campaign_id)) => format!("{campaign_id}/ads"),
         (None, None) => format!("{account_id}/ads"),
-        (Some(_), Some(_)) => unreachable!("conflicting scopes were rejected"),
+        (Some(_), Some(_)) => return Err(PublicError::internal("conflicting ad list scopes")),
     };
     Ok(ValidatedListAds {
         endpoint,

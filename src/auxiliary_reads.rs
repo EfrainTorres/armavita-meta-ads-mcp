@@ -1038,7 +1038,9 @@ fn build_threads_request(
             let edge = match mode {
                 ThreadsAccountMode::Associated => "connected_threads_user",
                 ThreadsAccountMode::InstagramBacked => "instagram_backed_threads_user",
-                ThreadsAccountMode::PageBacked => unreachable!(),
+                ThreadsAccountMode::PageBacked => {
+                    return Err(PublicError::internal("unexpected Threads account mode"));
+                }
             };
             Ok((
                 format!("{instagram_id}/{edge}"),

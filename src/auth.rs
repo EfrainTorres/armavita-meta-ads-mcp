@@ -609,16 +609,10 @@ fn tighten_file_permissions(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+/// Atomically replace `destination`. `fs::rename` replaces an existing file on
+/// every platform (on Windows through `MoveFileExW` with
+/// `MOVEFILE_REPLACE_EXISTING`), so the cache is never briefly missing.
 fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    fs::rename(source, destination)
-}
-
-#[cfg(target_os = "windows")]
-fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-    if destination.exists() {
-        fs::remove_file(destination)?;
-    }
     fs::rename(source, destination)
 }
 
@@ -713,6 +707,24 @@ mod tests {
         OAUTH_SCOPE, TokenInfo, constant_time_eq, html_escape, parse_callback_target,
         sanitize_message, valid_app_id,
     };
+
+    #[test]
+    fn replace_file_overwrites_an_existing_cache_in_place() {
+        let directory = std::env::temp_dir().join(format!(
+            "armavita-replace-file-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let destination = directory.join("token_cache.json");
+        let source = directory.join("new.tmp");
+        std::fs::write(&destination, "old").unwrap();
+        std::fs::write(&source, "new").unwrap();
+        super::replace_file(&source, &destination).unwrap();
+        assert_eq!(std::fs::read_to_string(&destination).unwrap(), "new");
+        assert!(!source.exists());
+        std::fs::remove_dir_all(directory).unwrap();
+    }
 
     #[test]
     fn callback_parser_decodes_once_and_rejects_duplicates() {

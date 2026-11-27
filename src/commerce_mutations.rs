@@ -656,18 +656,10 @@ fn provider_batch_product(input: BatchProductUpsert) -> Result<ProviderBatchProd
         currency.as_deref(),
     )?;
     let currency = currency.map(normalize_currency).transpose()?;
-    let price = price_amount.map(|amount| {
-        format!(
-            "{amount} {}",
-            currency.as_deref().expect("currency validated")
-        )
-    });
-    let sale_price = sale_price_amount.map(|amount| {
-        format!(
-            "{amount} {}",
-            currency.as_deref().expect("currency validated")
-        )
-    });
+    let price =
+        price_amount.map(|amount| format!("{amount} {}", currency.as_deref().unwrap_or_default()));
+    let sale_price = sale_price_amount
+        .map(|amount| format!("{amount} {}", currency.as_deref().unwrap_or_default()));
     let product = ProviderBatchProduct {
         title: optional_text(title, MAX_NAME_CHARS, "title")?,
         description: optional_text(description, MAX_DESCRIPTION_CHARS, "description")?,

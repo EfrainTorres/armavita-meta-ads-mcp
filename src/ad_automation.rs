@@ -340,7 +340,7 @@ impl Request {
 
     async fn send(self, graph: &GraphClient) -> ToolResponse<GraphData> {
         if let Some((fields, required)) = self.proof {
-            let object_id = self.endpoint.split('/').next().expect("validated endpoint");
+            let object_id = self.endpoint.split('/').next().unwrap_or_default();
             if let Err(error) =
                 crate::node_identity::verify_object(graph, object_id, fields, required).await
             {
@@ -387,7 +387,9 @@ fn rule_read(input: AutomationRead<AdRuleRead>) -> Result<Request, PublicError> 
             "id,name,status,evaluation_spec,execution_spec,schedule_spec",
             None,
         ),
-        AdRuleRead::GoverningObject { .. } => unreachable!("handled above"),
+        AdRuleRead::GoverningObject { .. } => {
+            return Err(PublicError::internal("unexpected ad rule read"));
+        }
         AdRuleRead::History {
             rule_id,
             action_filter,

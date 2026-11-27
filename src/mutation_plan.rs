@@ -812,7 +812,9 @@ fn prepare_write(
         MutationActionKind::Create => format!("{account}/{}", resource_type.create_edge()),
         MutationActionKind::Update => numeric_owned(object_id.as_deref().unwrap_or_default())
             .ok_or_else(|| invalid("object_id must be a numeric Meta object ID"))?,
-        MutationActionKind::Delete => unreachable!("writes contain create or update only"),
+        MutationActionKind::Delete => {
+            return Err(invalid("writes contain create or update only"));
+        }
     };
     let form = form_from_fields(&fields)?;
     let provider_validated = resource_type.provider_validates(action);
@@ -1282,7 +1284,7 @@ fn preview_value(path: &str, value: &Value) -> String {
         Value::Bool(value) => value.to_string(),
         Value::Number(value) => value.to_string(),
         Value::String(value) => preview_string(value),
-        Value::Array(_) | Value::Object(_) => unreachable!("preview visits scalar leaves"),
+        Value::Array(_) | Value::Object(_) => "[structured]".to_owned(),
     }
 }
 

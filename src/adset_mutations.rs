@@ -506,10 +506,9 @@ pub(crate) async fn clone_ad_set(
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let ad_set_id = request
-        .endpoint
-        .strip_suffix("/copies")
-        .expect("validated static suffix");
+    let Some(ad_set_id) = request.endpoint.strip_suffix("/copies") else {
+        return ToolResponse::error(PublicError::internal("unexpected /copies endpoint"));
+    };
     if let Err(error) = verify_meta_node(
         graph,
         ad_set_id,
@@ -1071,7 +1070,7 @@ fn encode_promoted_object(object: &AdSetPromotedObject) -> Result<String, Public
     })?;
     value
         .as_object_mut()
-        .expect("promoted object serializes as an object")
+        .ok_or_else(|| PublicError::internal("promoted_object did not encode as an object"))?
         .remove("kind");
     encode_json_value(&value, MAX_NESTED_BYTES, "promoted_object")
 }
@@ -1199,9 +1198,11 @@ fn invalid_store_url() -> PublicError {
 }
 
 fn wire_enum<T: Serialize>(value: T) -> String {
-    match serde_json::to_value(value).expect("enum serialization cannot fail") {
-        Value::String(value) => value,
-        _ => unreachable!("wire enums serialize as strings"),
+    // Wire enums always serialize as strings; anything else would be a bug, and an
+    // empty value makes Meta reject the request instead of aborting the server.
+    match serde_json::to_value(value) {
+        Ok(Value::String(value)) => value,
+        _ => String::new(),
     }
 }
 
@@ -1297,7 +1298,7 @@ fn cloned_ad_set(payload: &Value, status: AdSetCopyStatus) -> Result<ClonedAdSet
     let copied_object_count = match payload.get("ad_object_ids") {
         None | Some(Value::Null) => 0,
         Some(Value::Array(values)) if values.len() <= MAX_COPY_MAPPINGS => {
-            u16::try_from(values.len()).expect("copy mapping limit fits u16")
+            u16::try_from(values.len()).unwrap_or(u16::MAX)
         }
         _ => {
             return Err(ambiguous_result(

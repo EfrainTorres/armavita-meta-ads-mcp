@@ -405,7 +405,10 @@ fn parse_estimate(payload: Value) -> Result<AudienceSizeEstimate, PublicError> {
             "Meta did not return exactly one reach estimate",
         ));
     }
-    let raw = page.data.pop().expect("length checked above");
+    let raw = page
+        .data
+        .pop()
+        .ok_or_else(|| PublicError::invalid_upstream("Meta returned no reach estimate"))?;
     let estimate_ready = raw
         .estimate_ready
         .ok_or_else(|| PublicError::invalid_upstream("Meta omitted reach-estimate readiness"))?;

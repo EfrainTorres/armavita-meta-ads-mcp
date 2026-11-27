@@ -185,10 +185,11 @@ fn schedule_fields(
 async fn write_schedule(graph: &GraphClient, request: ScheduleWrite) -> ToolResponse<GraphData> {
     let proof = match &request.owner_account {
         Some(account) => {
-            let ad_set = request
-                .endpoint
-                .strip_suffix("/budget_schedules")
-                .expect("validated endpoint");
+            let Some(ad_set) = request.endpoint.strip_suffix("/budget_schedules") else {
+                return ToolResponse::error(PublicError::internal(
+                    "unexpected /budget_schedules endpoint",
+                ));
+            };
             verify_meta_node(graph, ad_set, MetaNodeKind::AdSet, Some(account))
                 .await
                 .map(|_| ())

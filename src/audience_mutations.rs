@@ -616,13 +616,7 @@ fn build_users_request(
             Value::Array(
                 normalized_data
                     .into_iter()
-                    .map(|row| {
-                        Value::String(
-                            row.into_iter()
-                                .next()
-                                .expect("validated scalar row has one value"),
-                        )
-                    })
+                    .map(|row| Value::String(row.into_iter().next().unwrap_or_default()))
                     .collect(),
             ),
         );
@@ -695,7 +689,7 @@ fn build_users_request(
         ad_account_id,
         custom_audience_id,
         operation: input.operation,
-        submitted_rows: u16::try_from(submitted_rows).expect("customer-list row limit fits in u16"),
+        submitted_rows: u16::try_from(submitted_rows).unwrap_or(u16::MAX),
     })
 }
 
@@ -908,7 +902,7 @@ fn normalize_identifier(field: UserIdentifierSchema, raw: &str) -> Result<String
     let digest = Sha256::digest(normalized.as_bytes());
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(&mut encoded, "{byte:02x}");
     }
     Ok(encoded)
 }

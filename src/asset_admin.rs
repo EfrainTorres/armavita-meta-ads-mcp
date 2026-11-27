@@ -626,7 +626,7 @@ async fn manage_access(
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let parent = path.split('/').next().expect("validated parent path");
+    let parent = path.split('/').next().unwrap_or_default();
     if let Err(error) = verify_kind(graph, parent, kind).await {
         return ToolResponse::error(error);
     }
