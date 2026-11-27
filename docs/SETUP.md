@@ -92,6 +92,17 @@ that folder. Uploads stay disabled if this setting is absent.
 Use Page media uploads when an Instant Experience needs a photo or video ID. Account image hashes
 are different assets. Page uploads remain unpublished.
 
+## Live smoke test
+
+After a build or a Graph version change, run the read-only smoke test against your own account:
+
+```sh
+META_ACCESS_TOKEN=... cargo test --locked --test live_smoke -- --ignored --nocapture
+```
+
+It lists accounts, reads one account (or `META_SMOKE_AD_ACCOUNT_ID`), its campaigns and 7-day
+account insights. It never writes and prints only the tool names that passed.
+
 ## A few Meta limits
 
 - Instant Form content cannot be edited after creation. Create a replacement form, or archive the old one.
