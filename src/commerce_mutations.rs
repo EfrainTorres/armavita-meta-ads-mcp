@@ -1062,6 +1062,7 @@ fn retryable_idempotent_result(message: &str, action: &str) -> PublicError {
         message: message.to_owned(),
         retryable: true,
         action: Some(action.to_owned()),
+        details: Default::default(),
     }
 }
 

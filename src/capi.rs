@@ -1804,6 +1804,7 @@ mod tests {
             code: Some(100),
             message: "alice@example.com was rejected".to_owned(),
             retryable: false,
+            details: None,
         });
         assert!(!error.message.contains("alice"));
         assert!(!error.retryable);

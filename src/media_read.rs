@@ -106,6 +106,7 @@ pub(crate) async fn read_ad_image(graph: &GraphClient, input: ReadAdImageInput) 
             message: "Meta did not return an image on an approved Meta CDN".to_owned(),
             retryable: false,
             action: Some("Store the creative image in the Meta ad image library".to_owned()),
+            details: Default::default(),
         }
     } else {
         media_public_error(last_error.unwrap_or(MediaReadError::Network))
@@ -510,18 +511,21 @@ fn media_public_error(error: MediaReadError) -> PublicError {
                 .to_owned(),
             retryable: false,
             action: Some("Store the creative image in the Meta ad image library".to_owned()),
+            details: Default::default(),
         },
         MediaReadError::UnsupportedMime | MediaReadError::InvalidSignature => PublicError {
             code: "UNSUPPORTED_MEDIA".to_owned(),
             message: "Meta returned an unsupported or mismatched image format".to_owned(),
             retryable: false,
             action: Some("Use a JPEG, PNG, WebP, or GIF creative image".to_owned()),
+            details: Default::default(),
         },
         MediaReadError::TooLarge => PublicError {
             code: "MEDIA_TOO_LARGE".to_owned(),
             message: format!("The ad image exceeds the {MAX_IMAGE_BYTES} byte safety limit"),
             retryable: false,
             action: Some("Use a smaller creative image".to_owned()),
+            details: Default::default(),
         },
         MediaReadError::Network | MediaReadError::HttpStatus | MediaReadError::Empty => {
             PublicError {
@@ -529,6 +533,7 @@ fn media_public_error(error: MediaReadError) -> PublicError {
                 message: "The Meta CDN image could not be retrieved".to_owned(),
                 retryable: true,
                 action: Some("Retry once; the signed Meta image URL may have expired".to_owned()),
+                details: Default::default(),
             }
         }
     }

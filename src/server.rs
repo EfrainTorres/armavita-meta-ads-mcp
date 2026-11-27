@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::access_token_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1682,6 +1683,7 @@ mod tests {
                 "get_mutation_plan",
                 "get_threads_account",
                 "grant_branded_content_ad_permission",
+                "inspect_access_token",
                 "inspect_ad_object",
                 "list_ad_accounts",
                 "list_ad_creatives",
@@ -1880,6 +1882,30 @@ mod tests {
     }
 
     #[test]
+    fn error_schema_keeps_details_optional_and_catalog_compact() {
+        let tools = server().tool_definitions();
+        for tool in &tools {
+            let Some(output) = &tool.output_schema else {
+                continue;
+            };
+            let output = serde_json::to_value(output.as_ref()).unwrap();
+            let Some(error) = output.pointer("/$defs/PublicError") else {
+                continue;
+            };
+            assert_eq!(
+                error["required"],
+                serde_json::json!(["code", "message", "retryable"]),
+                "{}: optional error details must not be required",
+                tool.name
+            );
+            assert!(output.pointer("/$defs/MetaErrorDetails").is_none());
+        }
+        // Some clients cap one message at 1 MiB; keep a wide margin.
+        let catalog = serde_json::to_string(&tools).unwrap().len();
+        assert!(catalog < 480_000, "tools/list grew to {catalog} bytes");
+    }
+
+    #[test]
     fn public_input_schemas_are_closed_and_required_arrays_are_bounded() {
         let tools = MetaAdsServer::new(MetaConfig::for_test(
             "https://graph.facebook.com/v26.0",
@@ -1887,7 +1913,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 126);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();

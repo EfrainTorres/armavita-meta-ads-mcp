@@ -286,6 +286,7 @@ fn normalize(mut value: Value, page_size: usize) -> Result<GraphData, PublicErro
             message: "Selected Meta data exceeds the 64 KiB tool output limit".to_owned(),
             retryable: false,
             action: Some("Request fewer fields or a smaller page".to_owned()),
+            details: Default::default(),
         });
     }
     Ok(GraphData {

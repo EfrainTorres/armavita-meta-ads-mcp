@@ -36,15 +36,15 @@ To start over, delete the cache file and log in again. Keep these files private.
 ### Permissions
 
 The default login requests `ads_management`, `ads_read`, `business_management`, `pages_show_list`,
-`pages_read_engagement`, `instagram_basic`, and `threads_business_basic`.
+`pages_read_engagement`, `pages_manage_ads`, `leads_retrieval`, `catalog_management`,
+`instagram_basic`, and `threads_business_basic`.
 
-Catalogs also need `catalog_management`. Partnership permission writes need
-`instagram_branded_content_ads_brand` and the appropriate ADVERTISER asset role.
-Other workflows may need these additional permissions:
+Partnership permission writes need `instagram_branded_content_ads_brand` and the appropriate
+ADVERTISER asset role. Other workflows may need these additional permissions:
 
 | Workflow | Permissions |
 | --- | --- |
-| Instant Forms and submissions | `pages_manage_ads`, `leads_retrieval`, and Page lead access |
+| Instant Forms and submissions | Page lead access |
 | Lead webhook subscriptions | `pages_manage_metadata` |
 | Page media uploads and form cover photos | `pages_manage_posts` |
 | Facebook ad comments | `pages_read_user_content`, `pages_manage_engagement` |
@@ -53,6 +53,18 @@ Other workflows may need these additional permissions:
 To add scopes, set `META_AUTH_SCOPE` to the **full** desired list—it replaces the defaults.
 Your token must also have access to the accounts and assets you request.
 Page tokens are resolved internally and never returned to your assistant.
+
+`inspect_access_token` shows what the configured token can do: validity, type (user or system
+user), app, expiry, granted scopes with the assets each is limited to, and which recommended
+scopes are missing. It never returns the token.
+
+### App secret proof (optional)
+
+Set `META_APPSECRET_PROOF=1` together with `META_APP_SECRET` to sign every Graph request with
+`appsecret_proof`, the HMAC-SHA256 of the access token keyed by the app secret. This protects a
+leaked token from being used outside your app, and lets you enable *Require App Secret* in the
+app's settings. The secret must belong to the app that issued the token, or Meta rejects every
+call. Startup fails if the flag is on without a secret.
 
 ## Client configuration
 
