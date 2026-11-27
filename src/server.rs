@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::batch_read_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1646,6 +1647,7 @@ mod tests {
                 "apply_mutation_plan",
                 "batch_catalog_items",
                 "batch_products",
+                "batch_read",
                 "build_mutation_plan",
                 "change_ad_labels",
                 "clone_ad",
@@ -1887,7 +1889,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 126);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();
