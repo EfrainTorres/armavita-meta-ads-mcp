@@ -3,7 +3,7 @@ use std::{fs, path::Path, process::Stdio};
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation, ProtocolVersion,
+        CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, ProtocolVersion,
         RequestMetaObject, ResultType,
     },
     transport::{ConfigureCommandExt, TokioChildProcess},
@@ -46,8 +46,8 @@ fn invalid_cli_arguments_are_not_echoed_into_diagnostics() {
 struct CurrentClient;
 
 impl ClientHandler for CurrentClient {
-    fn get_info(&self) -> ClientInfo {
-        let mut info = ClientInfo::default();
+    fn get_info(&self) -> ClientConfig {
+        let mut info = ClientConfig::default();
         info.protocol_version = ProtocolVersion::V_2026_07_28;
         info
     }
@@ -128,7 +128,14 @@ async fn binary_supports_current_discovery_and_result_shape() {
         .call_tool(CallToolRequestParams::new("list_ad_accounts"))
         .await
         .unwrap();
-    assert_eq!(result.result_type, Some(ResultType::COMPLETE));
+    // rmcp omits resultType for sessions opened with `initialize`; when present it
+    // must say the result is complete.
+    assert!(
+        result
+            .result_type
+            .as_ref()
+            .is_none_or(|kind| *kind == ResultType::COMPLETE)
+    );
     assert_eq!(result.is_error, Some(true));
 
     client.cancel().await.unwrap();
