@@ -46,6 +46,41 @@ pub struct CreateCustomAudienceInput {
     pub customer_file_source: CustomerFileSource,
     /// Optional audience description, up to 1,000 characters.
     pub description: Option<String>,
+    /// Optional audience labels that tell Meta what the people are, e.g.
+    /// `["HIGH_VALUE_CUSTOMERS"]`. Up to 10.
+    #[schemars(length(min = 1, max = 10))]
+    pub audience_labels: Option<Vec<AudienceLabel>>,
+}
+
+/// Audience labels Meta accepts on customer-file, website and app audiences.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AudienceLabel {
+    QualifiedLeads,
+    DisqualifiedLeads,
+    AppUsers,
+    TrialUsers,
+    EngagedUsers,
+    HighValueCustomers,
+    LowValueCustomers,
+    AtRisk,
+    Disengaged,
+    GeneralCustomers,
+}
+
+fn encode_audience_labels(labels: &[AudienceLabel]) -> Result<String, PublicError> {
+    if labels.is_empty() || labels.len() > 10 {
+        return Err(PublicError::invalid_input(
+            "audience_labels must hold 1 through 10 labels",
+            "Remove extra labels",
+        ));
+    }
+    serde_json::to_string(labels).map_err(|_| {
+        PublicError::invalid_input(
+            "audience_labels could not be encoded",
+            "Use the documented labels",
+        )
+    })
 }
 
 /// Update mutable customer-list metadata. Non-destructive and idempotent for an
@@ -62,6 +97,10 @@ pub struct UpdateCustomAudienceInput {
     pub name: Option<String>,
     /// New description, up to 1,000 characters. Use an empty string to clear it.
     pub description: Option<String>,
+    /// Replace the audience labels that tell Meta what the people are, e.g.
+    /// `["HIGH_VALUE_CUSTOMERS"]`. Up to 10.
+    #[schemars(length(min = 1, max = 10))]
+    pub audience_labels: Option<Vec<AudienceLabel>>,
 }
 
 /// Permanently delete an audience. Destructive but idempotent in final-state
@@ -522,6 +561,12 @@ fn build_create_request(input: &CreateCustomAudienceInput) -> Result<MutationReq
     )? {
         form.push(("description".to_owned(), description));
     }
+    if let Some(labels) = &input.audience_labels {
+        form.push((
+            "audience_labels".to_owned(),
+            encode_audience_labels(labels)?,
+        ));
+    }
     Ok(MutationRequest {
         method: MutationMethod::Post,
         endpoint: format!("{account_id}/customaudiences"),
@@ -545,10 +590,16 @@ fn build_update_request(input: &UpdateCustomAudienceInput) -> Result<MutationReq
             bounded_text_allow_empty(description, MAX_DESCRIPTION_CHARS, "description")?,
         ));
     }
+    if let Some(labels) = &input.audience_labels {
+        form.push((
+            "audience_labels".to_owned(),
+            encode_audience_labels(labels)?,
+        ));
+    }
     if form.is_empty() {
         return Err(PublicError::invalid_input(
             "at least one audience update is required",
-            "Provide name and/or description",
+            "Provide name, description and/or audience_labels",
         ));
     }
     Ok(MutationRequest {
@@ -1352,6 +1403,7 @@ mod tests {
                             custom_audience_id: "42".to_owned(),
                             name: Some("Renamed".to_owned()),
                             description: None,
+                            audience_labels: None,
                         },
                     )
                     .await,
@@ -1449,6 +1501,7 @@ mod tests {
                             custom_audience_id: "42".to_owned(),
                             name: Some("Renamed".to_owned()),
                             description: None,
+                            audience_labels: None,
                         },
                     )
                     .await,
@@ -1518,6 +1571,7 @@ mod tests {
             name: " Seed ".to_owned(),
             customer_file_source: CustomerFileSource::UserProvidedOnly,
             description: Some(" Current customers ".to_owned()),
+            audience_labels: None,
         })
         .unwrap();
         assert!(create.method == MutationMethod::Post);
@@ -1540,6 +1594,7 @@ mod tests {
             custom_audience_id: " 456 ".to_owned(),
             name: Some(" Renamed ".to_owned()),
             description: Some(" ".to_owned()),
+            audience_labels: None,
         })
         .unwrap();
         assert_eq!(update.endpoint, "456");
@@ -1860,6 +1915,7 @@ mod tests {
             name: "Bad\0Name".to_owned(),
             customer_file_source: CustomerFileSource::UserProvidedOnly,
             description: None,
+            audience_labels: None,
         });
         assert!(control_name.is_err());
 
@@ -1868,6 +1924,7 @@ mod tests {
             custom_audience_id: "42".to_owned(),
             name: None,
             description: Some("Bad\0description".to_owned()),
+            audience_labels: None,
         });
         assert!(control_description.is_err());
 
@@ -1876,6 +1933,7 @@ mod tests {
             custom_audience_id: "42".to_owned(),
             name: None,
             description: None,
+            audience_labels: None,
         });
         assert!(no_update.is_err());
 
@@ -1994,5 +2052,37 @@ mod tests {
         assert!(!format!("{uncertain:?}").contains("raw-sensitive-marker"));
         assert!(!uncertain.retryable);
         assert_eq!(uncertain.action.as_deref(), Some("Verify state"));
+    }
+
+    #[test]
+    fn sends_audience_labels_on_create_and_update() {
+        let create: CreateCustomAudienceInput = serde_json::from_value(serde_json::json!({
+            "ad_account_id": "123",
+            "name": "Buyers",
+            "customer_file_source": "USER_PROVIDED_ONLY",
+            "audience_labels": ["HIGH_VALUE_CUSTOMERS", "AT_RISK"]
+        }))
+        .unwrap();
+        let request = build_create_request(&create).unwrap();
+        assert!(request.form.contains(&(
+            "audience_labels".to_owned(),
+            "[\"HIGH_VALUE_CUSTOMERS\",\"AT_RISK\"]".to_owned()
+        )));
+        let update: UpdateCustomAudienceInput = serde_json::from_value(serde_json::json!({
+            "ad_account_id": "123",
+            "custom_audience_id": "42",
+            "audience_labels": ["QUALIFIED_LEADS"]
+        }))
+        .unwrap();
+        assert!(build_update_request(&update).is_ok());
+        assert!(
+            serde_json::from_value::<CreateCustomAudienceInput>(serde_json::json!({
+                "ad_account_id": "123",
+                "name": "Buyers",
+                "customer_file_source": "USER_PROVIDED_ONLY",
+                "audience_labels": ["VIP"]
+            }))
+            .is_err()
+        );
     }
 }

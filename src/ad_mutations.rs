@@ -4,6 +4,8 @@
 use reqwest::Url;
 use rmcp::schemars::{self, JsonSchema};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+
 use serde_json::Value;
 
 use crate::{
@@ -27,7 +29,6 @@ const MAX_HASH_CHARS: usize = 128;
 const MAX_TEXT_VARIANTS: usize = 5;
 const MAX_FLEX_IMAGES: usize = 10;
 const MIN_CAROUSEL_CARDS: usize = 2;
-const PRODUCT_EXTENSIONS_OPT_OUT: &str = r#"{"creative_features_spec":{"product_extensions":{"enroll_status":"OPT_OUT","action_metadata":{"type":"MANUAL"}}}}"#;
 const MAX_CAROUSEL_CARDS: usize = 10;
 const MAX_RENAME_CHARS: usize = 100;
 const MAX_NESTED_SPEC_BYTES: usize = 64 * 1024;
@@ -134,6 +135,110 @@ pub struct CreateAdCreativeInput {
     /// Set `true` to opt out of product extensions (Product showcase), which Meta
     /// can enable automatically on eligible creatives since v27. Omit to keep Meta's default.
     pub opt_out_product_extensions: Option<bool>,
+    /// Advantage+ creative features to opt in or out of, e.g.
+    /// `{"image_touchups": "OPT_IN", "text_optimizations": "OPT_OUT"}`. Meta silently
+    /// drops an opt-in the creative is not eligible for; read the creative back to
+    /// see what applied. Generative AI features (`creative_stickers`, `image_animation`,
+    /// `image_background_gen`, `image_templates`, `image_uncrop`, `text_generation`,
+    /// `translate_voiceover`, `video_uncrop`) must be previewed before the ad runs,
+    /// so keep ads using them PAUSED until reviewed.
+    pub creative_features: Option<BTreeMap<CreativeFeature, FeatureEnrollment>>,
+}
+
+/// Advantage+ creative feature keys documented for Graph v27.
+#[derive(
+    Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq, PartialOrd, Ord,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CreativeFeature {
+    AdaptToPlacement,
+    AddTextOverlay,
+    CreativeStickers,
+    DescriptionAutomation,
+    EnhanceCta,
+    ImageAnimation,
+    ImageBackgroundGen,
+    ImageBrightnessAndContrast,
+    ImageTemplates,
+    ImageTextTranslation,
+    ImageTouchups,
+    ImageUncrop,
+    InlineComment,
+    MediaTypeAutomation,
+    PacRelaxation,
+    ProductExtensions,
+    RevealDetailsOverTime,
+    TextGeneration,
+    TextOptimizations,
+    TextTranslation,
+    TranslateVoiceover,
+    VideoAutoCrop,
+    VideoFiltering,
+    VideoUncrop,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum FeatureEnrollment {
+    OptIn,
+    OptOut,
+}
+
+/// Build `degrees_of_freedom_spec` from the feature map and the product-extension
+/// opt-out. Returns `None` when neither asks for anything.
+fn degrees_of_freedom_spec(
+    features: Option<&BTreeMap<CreativeFeature, FeatureEnrollment>>,
+    opt_out_product_extensions: Option<bool>,
+) -> Result<Option<String>, PublicError> {
+    let mut features = features.cloned().unwrap_or_default();
+    if opt_out_product_extensions == Some(true) {
+        if features.get(&CreativeFeature::ProductExtensions) == Some(&FeatureEnrollment::OptIn) {
+            return Err(PublicError::invalid_input(
+                "opt_out_product_extensions conflicts with product_extensions OPT_IN",
+                "Keep one of the two settings",
+            ));
+        }
+        features.insert(
+            CreativeFeature::ProductExtensions,
+            FeatureEnrollment::OptOut,
+        );
+    }
+    if features.is_empty() {
+        return Ok(None);
+    }
+    let mut spec = serde_json::Map::new();
+    for (feature, enrollment) in features {
+        let key = serde_json::to_value(feature)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                PublicError::invalid_input(
+                    "creative_features could not be encoded",
+                    "Use the documented feature names",
+                )
+            })?;
+        let mut entry = serde_json::Map::new();
+        let status = match enrollment {
+            FeatureEnrollment::OptIn => "OPT_IN",
+            FeatureEnrollment::OptOut => "OPT_OUT",
+        };
+        entry.insert("enroll_status".to_owned(), Value::String(status.to_owned()));
+        if feature == CreativeFeature::ProductExtensions {
+            entry.insert(
+                "action_metadata".to_owned(),
+                serde_json::json!({"type": "MANUAL"}),
+            );
+        }
+        spec.insert(key, Value::Object(entry));
+    }
+    serde_json::to_string(&serde_json::json!({"creative_features_spec": spec}))
+        .map(Some)
+        .map_err(|_| {
+            PublicError::invalid_input(
+                "creative_features could not be encoded",
+                "Use the documented feature names",
+            )
+        })
 }
 
 /// Rename an existing creative. Meta v26 does not permit content/spec updates on
@@ -850,11 +955,11 @@ fn build_create_creative_request(
     if let Some(url_tags) = &input.url_tags {
         form.push(("url_tags".to_owned(), bounded_url_tags(url_tags)?));
     }
-    if input.opt_out_product_extensions == Some(true) {
-        form.push((
-            "degrees_of_freedom_spec".to_owned(),
-            PRODUCT_EXTENSIONS_OPT_OUT.to_owned(),
-        ));
+    if let Some(spec) = degrees_of_freedom_spec(
+        input.creative_features.as_ref(),
+        input.opt_out_product_extensions,
+    )? {
+        form.push(("degrees_of_freedom_spec".to_owned(), spec));
     }
     Ok(MutationRequest {
         endpoint: format!("{account_id}/adcreatives"),
@@ -1689,6 +1794,7 @@ mod tests {
             },
             url_tags: Some("utm_source=meta".to_owned()),
             opt_out_product_extensions: None,
+            creative_features: None,
         })
         .unwrap();
         assert_eq!(
@@ -1705,6 +1811,51 @@ mod tests {
                     ("url_tags".to_owned(), "utm_source=meta".to_owned()),
                 ],
             }
+        );
+    }
+
+    #[test]
+    fn encodes_advantage_creative_features_and_rejects_conflicts() {
+        use super::{CreativeFeature, FeatureEnrollment, degrees_of_freedom_spec};
+        use std::collections::BTreeMap;
+
+        let features = BTreeMap::from([
+            (CreativeFeature::ImageTouchups, FeatureEnrollment::OptIn),
+            (
+                CreativeFeature::TextOptimizations,
+                FeatureEnrollment::OptOut,
+            ),
+        ]);
+        let spec: serde_json::Value = serde_json::from_str(
+            &degrees_of_freedom_spec(Some(&features), Some(true))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            spec,
+            serde_json::json!({"creative_features_spec": {
+                "image_touchups": {"enroll_status": "OPT_IN"},
+                "product_extensions": {"enroll_status": "OPT_OUT", "action_metadata": {"type": "MANUAL"}},
+                "text_optimizations": {"enroll_status": "OPT_OUT"}
+            }})
+        );
+        assert_eq!(degrees_of_freedom_spec(None, None).unwrap(), None);
+        assert_eq!(degrees_of_freedom_spec(None, Some(false)).unwrap(), None);
+        let conflict =
+            BTreeMap::from([(CreativeFeature::ProductExtensions, FeatureEnrollment::OptIn)]);
+        assert!(degrees_of_freedom_spec(Some(&conflict), Some(true)).is_err());
+        let parsed: BTreeMap<CreativeFeature, FeatureEnrollment> =
+            serde_json::from_value(serde_json::json!({"video_uncrop": "OPT_IN"})).unwrap();
+        assert_eq!(
+            parsed[&CreativeFeature::VideoUncrop],
+            FeatureEnrollment::OptIn
+        );
+        assert!(
+            serde_json::from_value::<BTreeMap<CreativeFeature, FeatureEnrollment>>(
+                serde_json::json!({"standard_enhancements": "OPT_IN"})
+            )
+            .is_err()
         );
     }
 
@@ -1727,6 +1878,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: opt_out,
+            creative_features: None,
         };
         let request = build_create_creative_request(&input(Some(true))).unwrap();
         let spec: serde_json::Value = serde_json::from_str(
@@ -1764,6 +1916,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: None,
+            creative_features: None,
         })
         .unwrap();
         assert_eq!(
@@ -1792,6 +1945,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: None,
+            creative_features: None,
         })
         .unwrap();
         assert_eq!(
@@ -1820,6 +1974,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: None,
+            creative_features: None,
         })
         .unwrap();
         assert_eq!(
@@ -1874,6 +2029,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: None,
+            creative_features: None,
         })
         .unwrap();
         let feed: Value =
@@ -1906,6 +2062,7 @@ mod tests {
             },
             url_tags: None,
             opt_out_product_extensions: None,
+            creative_features: None,
         };
         assert!(build_create_creative_request(&invalid_carousel).is_err());
     }

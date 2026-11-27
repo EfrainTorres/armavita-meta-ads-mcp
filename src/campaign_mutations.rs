@@ -45,6 +45,9 @@ pub struct CreateCampaignInput {
     pub bid_strategy: Option<CampaignBidStrategy>,
     /// Optional account-currency spend cap in minor units.
     pub spend_cap: Option<u32>,
+    /// Sales only: create the unified Advantage+ sales campaign structure
+    /// (`is_pca_unified`). It cannot be changed after creation.
+    pub is_pca_unified: Option<bool>,
 }
 
 /// Update one campaign. This is an idempotent external mutation for an unchanged
@@ -114,7 +117,7 @@ pub struct CreateCampaignBudgetScheduleInput {
     pub time_end: u32,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub enum CampaignObjective {
     #[serde(rename = "OUTCOME_APP_PROMOTION")]
     AppPromotion,
@@ -514,6 +517,15 @@ fn build_create_request(input: &CreateCampaignInput) -> Result<MutationRequest, 
     }
     if let Some(spend_cap) = input.spend_cap {
         form.push(("spend_cap".to_owned(), spend_cap.to_string()));
+    }
+    if let Some(unified) = input.is_pca_unified {
+        if unified && input.objective != CampaignObjective::Sales {
+            return Err(PublicError::invalid_input(
+                "is_pca_unified requires the OUTCOME_SALES objective",
+                "Use objective OUTCOME_SALES or omit is_pca_unified",
+            ));
+        }
+        form.push(("is_pca_unified".to_owned(), unified.to_string()));
     }
 
     Ok(MutationRequest {
@@ -934,6 +946,7 @@ mod tests {
             special_ad_category_countries: Some(vec!["us".to_owned(), "US".to_owned()]),
             bid_strategy: Some(CampaignBidStrategy::LowestCostWithoutCap),
             spend_cap: Some(50_000),
+            is_pca_unified: None,
         })
         .unwrap();
 
@@ -978,6 +991,7 @@ mod tests {
             special_ad_category_countries: None,
             bid_strategy: None,
             spend_cap: None,
+            is_pca_unified: None,
         };
         assert!(build_create_request(&invalid_budget).is_err());
 
@@ -1142,5 +1156,30 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn unified_sales_flag_is_sent_only_for_sales_campaigns() {
+        let input = |objective, unified| CreateCampaignInput {
+            ad_account_id: "123".to_owned(),
+            name: "Sales".to_owned(),
+            objective,
+            budget: CampaignBudget::Daily { amount: 2_500 },
+            status: None,
+            special_ad_categories: None,
+            special_ad_category_countries: None,
+            bid_strategy: None,
+            spend_cap: None,
+            is_pca_unified: unified,
+        };
+        let request = build_create_request(&input(CampaignObjective::Sales, Some(true))).unwrap();
+        assert!(
+            request
+                .form
+                .contains(&("is_pca_unified".to_owned(), "true".to_owned()))
+        );
+        assert!(build_create_request(&input(CampaignObjective::Leads, Some(true))).is_err());
+        let plain = build_create_request(&input(CampaignObjective::Leads, None)).unwrap();
+        assert!(plain.form.iter().all(|(key, _)| key != "is_pca_unified"));
     }
 }

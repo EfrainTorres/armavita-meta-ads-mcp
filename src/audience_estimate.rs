@@ -105,6 +105,14 @@ pub struct TargetingAutomation {
     /// Per-dimension automation switches.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub individual_setting: Option<IndividualAutomationSetting>,
+    /// Let Meta pair each creative with the audience it suits best. Off when
+    /// omitted. Sent to Meta as `1` or `0`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "bool_as_flag"
+    )]
+    pub creative_audience_pairing: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, JsonSchema)]
@@ -501,7 +509,8 @@ mod tests {
                 "geo_locations": {"countries": ["US"]},
                 "targeting_automation": {
                     "advantage_audience": false,
-                    "individual_setting": {"device": false}
+                    "individual_setting": {"device": false},
+                    "creative_audience_pairing": true
                 }
             }
         }))
@@ -510,7 +519,7 @@ mod tests {
         let targeting: Value = serde_json::from_str(&query[0].1).expect("targeting JSON");
         assert_eq!(
             targeting["targeting_automation"],
-            json!({"advantage_audience": 0, "individual_setting": {"device": 0}})
+            json!({"advantage_audience": 0, "individual_setting": {"device": 0}, "creative_audience_pairing": 1})
         );
 
         let omitted = minimal_input();
