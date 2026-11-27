@@ -26,6 +26,7 @@ use crate::{
 const USER_AGENT: &str = concat!("armavita-meta-ads-mcp/", env!("CARGO_PKG_VERSION"));
 const MAX_ENDPOINT_BYTES: usize = 512;
 const MAX_QUERY_PAIRS: usize = 64;
+const MAX_BATCH_REQUESTS: usize = 50;
 const MAX_QUERY_BYTES: usize = 128 * 1024;
 const MAX_QUERY_KEY_BYTES: usize = 64;
 const TOTAL_GET_TIMEOUT: Duration = Duration::from_secs(90);
@@ -225,6 +226,85 @@ impl GraphClient {
                 message: "Meta request timed out".to_owned(),
             })
         })
+    }
+
+    /// Run up to 50 read-only GETs in one Graph batch request.
+    ///
+    /// Every endpoint and query passes the same validation as `get_json`, and each
+    /// item's body is sanitized like any other response. Items Meta did not finish
+    /// come back as `None`. The batch POST itself is sent once.
+    pub(crate) async fn get_batch(
+        &self,
+        requests: &[(String, Vec<(String, String)>)],
+    ) -> Result<Vec<Option<BatchItem>>, GraphError> {
+        if !self.authenticated.load(Ordering::Acquire) {
+            return Err(GraphError::NotAuthenticated);
+        }
+        if requests.is_empty() || requests.len() > MAX_BATCH_REQUESTS {
+            return Err(GraphError::InvalidQuery);
+        }
+        let mut batch = Vec::with_capacity(requests.len());
+        for (endpoint, query) in requests {
+            if !valid_endpoint(endpoint) {
+                return Err(GraphError::InvalidEndpoint);
+            }
+            if !valid_query(query) {
+                return Err(GraphError::InvalidQuery);
+            }
+            let mut relative_url = endpoint.trim_matches('/').to_owned();
+            if !query.is_empty() {
+                let mut encoder =
+                    Url::parse("https://batch.invalid/").map_err(|_| GraphError::InvalidQuery)?;
+                encoder.query_pairs_mut().extend_pairs(query);
+                relative_url.push('?');
+                relative_url.push_str(encoder.query().unwrap_or_default());
+            }
+            batch.push(serde_json::json!({"method": "GET", "relative_url": relative_url}));
+        }
+        let form = [
+            (
+                "batch".to_owned(),
+                serde_json::to_string(&batch).map_err(|_| GraphError::InvalidQuery)?,
+            ),
+            ("include_headers".to_owned(), "false".to_owned()),
+        ];
+        let body = encode_mutation_params(&form)?;
+        let url = format!("{}/", self.api_base);
+        let payload = tokio::time::timeout(TOTAL_GET_TIMEOUT, async {
+            let response = self
+                .request(Method::POST, url)
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(body)
+                .send()
+                .await
+                .map_err(|error| public_transport_error(&error))?;
+            self.parse_mutation_response(response).await
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(GraphError::Transport {
+                message: "Meta request timed out".to_owned(),
+            })
+        })?;
+        let Value::Array(items) = payload else {
+            return Err(GraphError::InvalidJson);
+        };
+        Ok(items
+            .into_iter()
+            .map(|item| {
+                let code = item
+                    .get("code")
+                    .and_then(Value::as_u64)
+                    .and_then(|code| u16::try_from(code).ok())?;
+                let mut body = item
+                    .get("body")
+                    .and_then(Value::as_str)
+                    .and_then(|text| serde_json::from_str::<Value>(text).ok())
+                    .unwrap_or(Value::Null);
+                sanitize_payload(&mut body);
+                Some(BatchItem { code, body })
+            })
+            .collect())
     }
 
     /// Submit one bounded Graph DELETE with optional query parameters.
@@ -505,6 +585,13 @@ impl GraphClient {
 
 #[derive(Debug)]
 pub(crate) struct MediaTransportError;
+
+/// One finished item of a Graph batch: its HTTP status and sanitized JSON body.
+#[derive(Debug)]
+pub(crate) struct BatchItem {
+    pub(crate) code: u16,
+    pub(crate) body: Value,
+}
 
 struct ParsedGraphResponse {
     status: StatusCode,

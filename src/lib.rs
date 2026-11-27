@@ -18,6 +18,7 @@ mod audiences;
 mod auth;
 mod auxiliary_mutations;
 mod auxiliary_reads;
+mod batch_read;
 mod bounded_json;
 mod budget_schedules;
 mod campaign_mutations;
