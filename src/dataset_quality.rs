@@ -251,6 +251,7 @@ fn dataset_not_found() -> PublicError {
         message: "The dataset was not returned for this business".to_owned(),
         retryable: false,
         action: Some("Verify both IDs and Business access with list_business_datasets".to_owned()),
+        details: Default::default(),
     }
 }
 
@@ -262,6 +263,7 @@ fn exact_filter_error(message: &str) -> PublicError {
         action: Some(
             "Verify dataset ownership; report persistent Meta API contract drift".to_owned(),
         ),
+        details: Default::default(),
     }
 }
 
