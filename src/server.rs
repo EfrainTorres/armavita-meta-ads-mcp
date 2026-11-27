@@ -1,7 +1,7 @@
 use rmcp::{
     Json, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo, Tool},
+    model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig, Tool},
     tool, tool_handler, tool_router,
 };
 
@@ -116,6 +116,9 @@ use crate::{
         search_interests, suggest_interests,
     },
 };
+
+/// The tool catalog is fixed for the life of the process, so clients may cache it.
+const TOOLS_LIST_TTL_MS: u64 = 60 * 60 * 1000;
 
 const SERVER_INSTRUCTIONS: &str = "Use this server for Meta Ads delivery, audiences, reports, media, catalogs, CAPI, partnerships, reach/frequency, and Threads. Keep credentials outside tools; never place access tokens in prompts. Prefer typed tools. For uncommon v26 writes, build and review one frozen request; plans are not atomic. Apply needs APPLY_LIVE_META_ADS_CHANGES; removals need CONFIRM_META_ADS_REMOVALS. Writes are one-shot: reconcile unknown outcomes before retrying. Read current state first; page with next_cursor only as needed.";
 
@@ -1603,13 +1606,43 @@ impl MetaAdsServer {
 
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for MetaAdsServer {
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new(
                 "armavita-meta-ads-mcp",
                 env!("CARGO_PKG_VERSION"),
             ))
             .with_instructions(SERVER_INSTRUCTIONS)
+    }
+
+    /// Same as the generated handler, but with a real cache hint: the catalog
+    /// never changes while the process runs. Hints exist only from protocol
+    /// 2026-07-28; older peers get none.
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, rmcp::ErrorData> {
+        Ok(tools_list_result(
+            self.tool_router.list_all(),
+            context.protocol_version(),
+        ))
+    }
+}
+
+fn tools_list_result(
+    tools: Vec<Tool>,
+    protocol: Option<rmcp::model::ProtocolVersion>,
+) -> rmcp::model::ListToolsResult {
+    let hints =
+        protocol.is_some_and(|version| version >= rmcp::model::ProtocolVersion::V_2026_07_28);
+    rmcp::model::ListToolsResult {
+        result_type: Some(rmcp::model::ResultType::COMPLETE),
+        tools,
+        meta: None,
+        next_cursor: None,
+        ttl_ms: hints.then_some(TOOLS_LIST_TTL_MS),
+        cache_scope: hints.then_some(rmcp::model::CacheScope::Public),
     }
 }
 
@@ -1880,6 +1913,31 @@ mod tests {
     }
 
     #[test]
+    fn output_schemas_survive_for_peers_before_2026_07_28() {
+        use rmcp::model::{ListToolsResult, ServerResult};
+
+        let tools = server().tool_definitions();
+        let with_schema = tools
+            .iter()
+            .filter(|tool| tool.output_schema.is_some())
+            .count();
+        let mut result = ServerResult::ListToolsResult(ListToolsResult::with_all_items(tools));
+        result.strip_non_object_output_for_legacy_peer();
+        let ServerResult::ListToolsResult(result) = result else {
+            unreachable!()
+        };
+        let kept = result
+            .tools
+            .iter()
+            .filter(|tool| tool.output_schema.is_some())
+            .count();
+        assert_eq!(
+            kept, with_schema,
+            "older peers must keep every outputSchema"
+        );
+    }
+
+    #[test]
     fn public_input_schemas_are_closed_and_required_arrays_are_bounded() {
         let tools = MetaAdsServer::new(MetaConfig::for_test(
             "https://graph.facebook.com/v26.0",
@@ -1971,6 +2029,20 @@ mod tests {
         assert_eq!(annotations.read_only_hint, Some(false));
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
+    }
+
+    #[test]
+    fn tools_list_carries_cache_hints_only_for_current_protocol() {
+        use rmcp::model::{CacheScope, ProtocolVersion};
+
+        let current = super::tools_list_result(Vec::new(), Some(ProtocolVersion::V_2026_07_28));
+        assert_eq!(current.ttl_ms, Some(super::TOOLS_LIST_TTL_MS));
+        assert_eq!(current.cache_scope, Some(CacheScope::Public));
+        for legacy in [None, Some(ProtocolVersion::V_2025_11_25)] {
+            let result = super::tools_list_result(Vec::new(), legacy);
+            assert_eq!(result.ttl_ms, None);
+            assert_eq!(result.cache_scope, None);
+        }
     }
 
     #[test]
