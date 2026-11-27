@@ -1,3 +1,6 @@
+// Test helpers outside #[test] functions unwrap freely; failures should fail the test.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::{fs, path::Path, process::Stdio};
 
 use rmcp::{

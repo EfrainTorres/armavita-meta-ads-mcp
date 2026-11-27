@@ -281,11 +281,11 @@ impl MetaAdsServer {
 
     #[tool(
         name = "update_campaign",
-        description = "Update explicitly supplied fields on one Meta campaign; ACTIVE may begin delivery.",
+        description = "Update explicitly supplied fields on one Meta campaign; ACTIVE may begin delivery and ARCHIVED is effectively permanent.",
         annotations(
             title = "Update Meta campaign",
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = true
         )
@@ -358,11 +358,11 @@ impl MetaAdsServer {
 
     #[tool(
         name = "update_ad_set",
-        description = "Update explicitly supplied fields on one Meta ad set; ACTIVE may begin delivery.",
+        description = "Update explicitly supplied fields on one Meta ad set; ACTIVE may begin delivery and ARCHIVED is effectively permanent.",
         annotations(
             title = "Update Meta ad set",
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = true
         )
@@ -468,11 +468,11 @@ impl MetaAdsServer {
 
     #[tool(
         name = "update_ad",
-        description = "Update explicitly supplied fields on one Meta ad; ACTIVE may begin delivery.",
+        description = "Update explicitly supplied fields on one Meta ad; ACTIVE may begin delivery and ARCHIVED is effectively permanent.",
         annotations(
             title = "Update Meta ad",
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = true
         )
@@ -1849,17 +1849,19 @@ mod tests {
                     assert_eq!(annotations.destructive_hint, Some(true));
                     assert_eq!(annotations.idempotent_hint, Some(false));
                 }
-                "delete_custom_audience" | "manage_lead_subscription" | "set_lead_form_status" => {
+                "delete_custom_audience"
+                | "manage_lead_subscription"
+                | "set_lead_form_status"
+                | "update_ad"
+                | "update_ad_set"
+                | "update_campaign" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(true));
                     assert_eq!(annotations.idempotent_hint, Some(true));
                 }
                 "update_account_controls"
                 | "discard_mutation_plan"
-                | "update_ad"
                 | "update_ad_creative"
-                | "update_ad_set"
-                | "update_campaign"
                 | "update_custom_audience"
                 | "update_custom_conversion"
                 | "upsert_product" => {

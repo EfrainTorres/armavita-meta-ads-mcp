@@ -640,10 +640,9 @@ pub(crate) async fn clone_ad(graph: &GraphClient, input: CloneAdInput) -> ToolRe
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let ad_id = request
-        .endpoint
-        .strip_suffix("/copies")
-        .expect("validated static suffix");
+    let Some(ad_id) = request.endpoint.strip_suffix("/copies") else {
+        return ToolResponse::error(PublicError::internal("unexpected /copies endpoint"));
+    };
     if let Err(error) =
         verify_meta_node(graph, ad_id, MetaNodeKind::Ad, Some(&input.ad_account_id)).await
     {

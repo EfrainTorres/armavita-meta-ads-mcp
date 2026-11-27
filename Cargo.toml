@@ -34,6 +34,10 @@ unsafe_code = "forbid"
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
+# Release builds abort on panic, so request paths return errors instead.
+expect_used = "warn"
+unwrap_used = "warn"
+panic = "warn"
 
 [profile.release]
 codegen-units = 1

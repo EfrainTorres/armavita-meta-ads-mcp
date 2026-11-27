@@ -418,7 +418,10 @@ impl MetaAdsServer {
             Ok(value) => value,
             Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),
         };
-        let page_id = graph_tools::id(&input.page_id, "page_id").expect("validated Page ID");
+        let page_id = match graph_tools::id(&input.page_id, "page_id") {
+            Ok(page_id) => page_id,
+            Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),
+        };
         let graph = match self.graph.for_page(&page_id).await {
             Ok(graph) => graph,
             Err(error) => return ToolResponse::<GraphData>::error(error).into_mcp_result(),

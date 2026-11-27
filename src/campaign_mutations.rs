@@ -398,10 +398,9 @@ pub(crate) async fn clone_campaign(
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let campaign_id = request
-        .endpoint
-        .strip_suffix("/copies")
-        .expect("validated static suffix");
+    let Some(campaign_id) = request.endpoint.strip_suffix("/copies") else {
+        return ToolResponse::error(PublicError::internal("unexpected /copies endpoint"));
+    };
     if let Err(error) = verify_meta_node(
         graph,
         campaign_id,
@@ -435,11 +434,12 @@ pub(crate) async fn create_campaign_budget_schedule(
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let campaign_id = request
-        .endpoint
-        .strip_suffix("/budget_schedules")
-        .expect("validated static suffix")
-        .to_owned();
+    let Some(campaign_id) = request.endpoint.strip_suffix("/budget_schedules") else {
+        return ToolResponse::error(PublicError::internal(
+            "unexpected /budget_schedules endpoint",
+        ));
+    };
+    let campaign_id = campaign_id.to_owned();
     if let Err(error) = verify_meta_node(
         graph,
         &campaign_id,
@@ -886,7 +886,7 @@ fn cloned_campaign(
     let copied_object_count = match payload.get("ad_object_ids") {
         None | Some(Value::Null) => 0,
         Some(Value::Array(values)) if values.len() <= MAX_COPY_MAPPINGS => {
-            u16::try_from(values.len()).expect("copy mapping limit fits u16")
+            u16::try_from(values.len()).unwrap_or(u16::MAX)
         }
         _ => {
             return Err(ambiguous_result(

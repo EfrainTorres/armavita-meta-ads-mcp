@@ -65,6 +65,17 @@ impl PublicError {
             action: Some("Retry once; inspect Meta service status if it persists".to_owned()),
         }
     }
+
+    /// A broken internal invariant. Returned instead of panicking: release builds
+    /// abort on panic, which would take every tool of the server down with it.
+    pub(crate) fn internal(context: &str) -> Self {
+        Self {
+            code: "INTERNAL_ERROR".to_owned(),
+            message: format!("Internal consistency check failed: {context}"),
+            retryable: false,
+            action: Some("Report this to the server maintainers with the tool name".to_owned()),
+        }
+    }
 }
 
 impl From<GraphError> for PublicError {

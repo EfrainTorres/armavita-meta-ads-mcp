@@ -293,7 +293,9 @@ fn write_request(
                     (
                         "location_types".into(),
                         graph_tools::json(
-                            &serde_json::to_value(location_types).expect("enum serialization"),
+                            &serde_json::to_value(location_types).map_err(|_| {
+                                PublicError::internal("location_types did not encode")
+                            })?,
                             "location_types",
                         )?,
                     ),

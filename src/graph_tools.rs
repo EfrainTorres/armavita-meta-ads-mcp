@@ -264,7 +264,7 @@ fn normalize(mut value: Value, page_size: usize) -> Result<GraphData, PublicErro
         Some(object) => {
             object.remove("paging");
             if object.get("data").is_some_and(Value::is_array) {
-                object.remove("data").expect("data array exists")
+                object.remove("data").unwrap_or_default()
             } else {
                 value
             }

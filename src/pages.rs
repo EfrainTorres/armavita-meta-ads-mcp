@@ -151,7 +151,9 @@ fn build_request(input: &ListPagesInput) -> Result<PageRequest, PublicError> {
             let edge = match source {
                 PageSource::BusinessOwned => "owned_pages",
                 PageSource::BusinessClient => "client_pages",
-                PageSource::UserPromotable => unreachable!(),
+                PageSource::UserPromotable => {
+                    return Err(PublicError::internal("unexpected Page source"));
+                }
             };
             format!("{business_id}/{edge}")
         }

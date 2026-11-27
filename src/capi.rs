@@ -483,7 +483,7 @@ fn build_request(input: SendCapiEventsInput, now: u64) -> Result<CapiRequest, Pu
         endpoint: format!("{dataset_id}/events"),
         form,
         dataset_id,
-        submitted_events: u16::try_from(events.len()).expect("event limit fits in u16"),
+        submitted_events: u16::try_from(events.len()).unwrap_or(u16::MAX),
         test_mode,
     })
 }
@@ -1262,7 +1262,7 @@ fn parse_ack(
     let provider_message_count = match payload.get("messages") {
         None | Some(Value::Null) => 0,
         Some(Value::Array(messages)) if messages.len() <= MAX_PROVIDER_MESSAGES => {
-            u16::try_from(messages.len()).expect("provider-message limit fits in u16")
+            u16::try_from(messages.len()).unwrap_or(u16::MAX)
         }
         _ => return Err(ambiguous_ack()),
     };
@@ -1284,7 +1284,7 @@ fn sha256_hex(value: &[u8]) -> String {
     let digest = Sha256::digest(value);
     let mut encoded = String::with_capacity(64);
     for byte in digest {
-        write!(&mut encoded, "{byte:02x}").expect("writing to a String cannot fail");
+        let _ = write!(&mut encoded, "{byte:02x}");
     }
     encoded
 }

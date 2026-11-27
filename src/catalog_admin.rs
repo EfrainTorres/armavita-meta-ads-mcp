@@ -973,7 +973,7 @@ async fn manage_connection(
         Ok(request) => request,
         Err(error) => return ToolResponse::error(error),
     };
-    let parent = path.split('/').next().expect("validated parent path");
+    let parent = path.split('/').next().unwrap_or_default();
     if let Err(error) = verify_catalog_kind(graph, parent, kind).await {
         return ToolResponse::error(error);
     }
@@ -1347,7 +1347,7 @@ fn catalog_batch_ack(mut data: GraphData) -> Result<GraphData, PublicError> {
     let object = data
         .result
         .as_object_mut()
-        .expect("handles belongs to an object");
+        .ok_or_else(|| PublicError::internal("catalog batch result is not an object"))?;
     object.insert("accepted".into(), json!(accepted));
     object.insert(
         "processing_status".into(),
