@@ -91,15 +91,26 @@ pub(crate) struct ApiErrorDetails {
     pub(crate) retry_after_seconds: Option<u64>,
 }
 
-/// Optional structured fields shared by every public error.
+// Optional structured fields shared by every public error. Every tool's output
+// schema embeds this type, so its schema is kept compact: plain comments instead
+// of doc comments, and `meta` described in one line instead of expanding
+// `MetaErrorDetails` and `RateLimitDetails` in all 128 tools.
 #[derive(Clone, Debug, Default, Serialize, JsonSchema)]
 pub struct PublicErrorDetails {
-    /// Seconds to wait before Meta is expected to accept the request again.
+    // Seconds to wait before Meta is expected to accept the request again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_seconds: Option<u64>,
     // Boxed so `Result<_, PublicError>` stays small on every tool path.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "meta_error_details_schema")]
     pub meta: Option<Box<MetaErrorDetails>>,
+}
+
+fn meta_error_details_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "object",
+        "description": "Meta codes, fbtrace_id, hint and rate_limit (no provider prose)."
+    })
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
