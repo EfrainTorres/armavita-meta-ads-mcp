@@ -1,6 +1,6 @@
 # Moving from Python
 
-The Rust version keeps the main advertising workflows and expands to 125 tools, compared with 78 in
+The Rust version keeps the main advertising workflows and expands to 128 tools, compared with 78 in
 [Python 1.2.0](https://github.com/EfrainTorres/armavita-meta-ads-mcp/tree/102f07fefa35dc94af5a00661ac51cfc16b63155).
 Both versions use local stdio and AGPLv3-only licensing. Some inputs and results have changed,
 including for tools whose names stayed the same.
@@ -9,7 +9,7 @@ including for tools whose names stayed the same.
 
 - Install the Rust executable and keep the server name `meta-ads-armavita` in your client config.
 - Remove `meta_access_token` from tool calls. Use `META_ACCESS_TOKEN` or browser login.
-- The API version is fixed at v26.0; `META_GRAPH_API_VERSION` no longer changes it.
+- The API version is fixed at v27.0 (2.0.0-rc.2 and earlier used v26.0); `META_GRAPH_API_VERSION` no longer changes it.
 - Use `--app-id` only with `--login`. On Windows, use an environment token.
 - Put local uploads under `META_MEDIA_ROOT` and use paths relative to that folder.
 

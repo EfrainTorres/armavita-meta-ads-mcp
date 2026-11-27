@@ -117,7 +117,7 @@ use crate::{
     },
 };
 
-const SERVER_INSTRUCTIONS: &str = "Use this server for Meta Ads delivery, audiences, reports, media, catalogs, CAPI, partnerships, reach/frequency, and Threads. Keep credentials outside tools; never place access tokens in prompts. Prefer typed tools. For uncommon v26 writes, build and review one frozen request; plans are not atomic. Apply needs APPLY_LIVE_META_ADS_CHANGES; removals need CONFIRM_META_ADS_REMOVALS. Writes are one-shot: reconcile unknown outcomes before retrying. Read current state first; page with next_cursor only as needed.";
+const SERVER_INSTRUCTIONS: &str = "Use this server for Meta Ads delivery, audiences, reports, media, catalogs, CAPI, partnerships, reach/frequency, and Threads. Keep credentials outside tools; never place access tokens in prompts. Prefer typed tools. For uncommon v27 writes, build and review one frozen request; plans are not atomic. Apply needs APPLY_LIVE_META_ADS_CHANGES; removals need CONFIRM_META_ADS_REMOVALS. Writes are one-shot: reconcile unknown outcomes before retrying. Read current state first; page with next_cursor only as needed.";
 
 #[derive(Debug, Clone)]
 pub struct MetaAdsServer {
@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::engagement_audiences_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -231,7 +232,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "list_campaigns",
-        description = "List campaigns for one Meta ad account with bounded v26 filters and cursor pagination.",
+        description = "List campaigns for one Meta ad account with bounded v27 filters and cursor pagination.",
         annotations(
             title = "List Meta campaigns",
             read_only_hint = true,
@@ -299,7 +300,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "clone_campaign",
-        description = "Copy one Meta campaign through the v26 copies edge; the copy defaults to PAUSED.",
+        description = "Copy one Meta campaign through the v27 copies edge; the copy defaults to PAUSED.",
         annotations(
             title = "Clone Meta campaign",
             read_only_hint = false,
@@ -376,7 +377,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "clone_ad_set",
-        description = "Copy one Meta ad set through the v26 copies edge; defaults to PAUSED and can optionally copy child ads.",
+        description = "Copy one Meta ad set through the v27 copies edge; defaults to PAUSED and can optionally copy child ads.",
         annotations(
             title = "Clone Meta ad set",
             read_only_hint = false,
@@ -486,7 +487,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "clone_ad",
-        description = "Copy one Meta ad through the v26 copies edge; defaults to PAUSED and repeated calls can duplicate it.",
+        description = "Copy one Meta ad through the v27 copies edge; defaults to PAUSED and repeated calls can duplicate it.",
         annotations(
             title = "Clone Meta ad",
             read_only_hint = false,
@@ -729,7 +730,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "create_lookalike_audience",
-        description = "Create one typed country-based lookalike; repeated calls can create duplicates.",
+        description = "Create one typed lookalike; it delivers to the locations of the ad sets using it (v27). Repeated calls can create duplicates.",
         annotations(
             title = "Create Meta lookalike audience",
             read_only_hint = false,
@@ -819,7 +820,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "search_ads_archive",
-        description = "Search Meta's public Ads Library with typed v26 filters and bounded cursor results.",
+        description = "Search Meta's public Ads Library with typed v27 filters and bounded cursor results.",
         annotations(
             title = "Search Meta Ads Library",
             read_only_hint = true,
@@ -1029,7 +1030,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "upsert_product",
-        description = "Create or update one catalog product by stable retailer ID through Meta's v26 product edge.",
+        description = "Create or update one catalog product by stable retailer ID through Meta's v27 product edge.",
         annotations(
             title = "Upsert Meta catalog product",
             read_only_hint = false,
@@ -1208,7 +1209,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "estimate_audience_size",
-        description = "Estimate a bounded common v26 targeting spec as readiness plus lower and upper user bounds.",
+        description = "Estimate a bounded common v27 targeting spec as readiness plus lower and upper user bounds.",
         annotations(
             title = "Estimate Meta audience size",
             read_only_hint = true,
@@ -1315,7 +1316,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "list_ad_custom_derived_metrics",
-        description = "List bounded custom derived metrics owned by one Meta Business under the v26 contract.",
+        description = "List bounded custom derived metrics owned by one Meta Business under the v27 contract.",
         annotations(
             title = "List Meta custom derived metrics",
             read_only_hint = true,
@@ -1419,7 +1420,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "build_mutation_plan",
-        description = "Freeze one bounded Graph v26 create, update, or delete plan for campaigns, ad sets, ads, creatives, custom audiences, or reach/frequency. Common delivery writes are validate-only checked; no live change occurs until apply_mutation_plan.",
+        description = "Freeze one bounded Graph v27 create, update, or delete plan for campaigns, ad sets, ads, creatives, custom audiences, or reach/frequency. Common delivery writes are validate-only checked; no live change occurs until apply_mutation_plan.",
         annotations(
             title = "Build a Meta Ads mutation plan",
             read_only_hint = false,
@@ -1540,7 +1541,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "create_reach_frequency_prediction",
-        description = "Create one bounded Graph v26 budget-to-reach quote without reserving inventory; verify the prediction list before retrying an ambiguous failure.",
+        description = "Create one bounded Graph v27 budget-to-reach quote without reserving inventory; verify the prediction list before retrying an ambiguous failure.",
         annotations(
             title = "Create Meta reach/frequency prediction",
             read_only_hint = false,
@@ -1581,7 +1582,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "create_threads_account",
-        description = "Create one Instagram- or Page-backed Threads account; v26 does not accept its ID as a creative input.",
+        description = "Create one Instagram- or Page-backed Threads account; Meta (v26+) does not accept its ID as a creative input.",
         annotations(
             title = "Create Meta Threads account",
             read_only_hint = false,
@@ -1627,7 +1628,7 @@ mod tests {
 
     fn server() -> MetaAdsServer {
         MetaAdsServer::new(MetaConfig::for_test(
-            "https://graph.facebook.com/v26.0",
+            "https://graph.facebook.com/v27.0",
             None,
         ))
         .unwrap()
@@ -1644,6 +1645,7 @@ mod tests {
             names,
             [
                 "apply_mutation_plan",
+                "audit_audiences",
                 "batch_catalog_items",
                 "batch_products",
                 "build_mutation_plan",
@@ -1660,6 +1662,7 @@ mod tests {
                 "create_campaign_budget_schedule",
                 "create_custom_audience",
                 "create_custom_conversion",
+                "create_engagement_audience",
                 "create_feed_error_report",
                 "create_insights_job",
                 "create_lead_form",
@@ -1676,6 +1679,7 @@ mod tests {
                 "delete_custom_conversion",
                 "delete_test_lead",
                 "discard_mutation_plan",
+                "ensure_audience_set",
                 "estimate_audience_size",
                 "generate_creative_previews",
                 "get_account_controls",
@@ -1799,6 +1803,7 @@ mod tests {
                 | "create_campaign_budget_schedule"
                 | "create_custom_audience"
                 | "create_custom_conversion"
+                | "create_engagement_audience"
                 | "create_insights_job"
                 | "create_lookalike_audience"
                 | "create_reach_frequency_prediction"
@@ -1862,6 +1867,7 @@ mod tests {
                 | "update_campaign"
                 | "update_custom_audience"
                 | "update_custom_conversion"
+                | "ensure_audience_set"
                 | "upsert_product" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(false));
@@ -1882,12 +1888,12 @@ mod tests {
     #[test]
     fn public_input_schemas_are_closed_and_required_arrays_are_bounded() {
         let tools = MetaAdsServer::new(MetaConfig::for_test(
-            "https://graph.facebook.com/v26.0",
+            "https://graph.facebook.com/v27.0",
             None,
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 128);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();

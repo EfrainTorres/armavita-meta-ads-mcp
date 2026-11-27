@@ -30,6 +30,7 @@ mod config;
 mod creatives;
 mod custom_conversion_mutations;
 mod dataset_quality;
+mod engagement_audiences;
 mod error;
 mod graph;
 mod graph_tools;

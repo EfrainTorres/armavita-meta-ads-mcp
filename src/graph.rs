@@ -937,7 +937,7 @@ mod tests {
         let mut malformed = json!({
             "access_token": "secret-one",
             "message": "failed access_token=secret-two after validation",
-            "paging": "/v26.0/me?access_token=secret-three&after=y"
+            "paging": "/v27.0/me?access_token=secret-three&after=y"
         });
         sanitize_payload(&mut malformed);
         let serialized = malformed.to_string();

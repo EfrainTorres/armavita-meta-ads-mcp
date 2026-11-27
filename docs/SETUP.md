@@ -92,6 +92,28 @@ that folder. Uploads stay disabled if this setting is absent.
 Use Page media uploads when an Instant Experience needs a photo or video ID. Account image hashes
 are different assets. Page uploads remain unpublished.
 
+## Engagement and website audience sets
+
+`ensure_audience_set` brings an ad account to a declared set of rule-based audiences and is safe to
+repeat:
+
+1. Call it without `apply_acknowledgement`. It lists the account's audiences, reads 30 days of
+   pixel activity, and returns what it would create, what already exists, what it skips (missing
+   asset, or a pixel event that never fired) and a `plan_token`.
+2. After the operator approves, call it again with the same input plus `plan_token` and
+   `apply_acknowledgement=APPLY_LIVE_META_ADS_CHANGES`. If the account changed meanwhile, it
+   answers `PLAN_CHANGED`; preview again.
+
+Each audience it creates carries `armavita:set=<set>;key=<key>` in its description, so later runs
+skip it even after a rename. It never deletes. Presets: `funnel_core` (about 12 funnel audiences,
+combining Instagram, Page and website sources) and `engagement_matrix` (every event for each
+retention window). Retention limits: Instagram and Page engagement 730 days, website 180 days,
+the Purchase event 730 days.
+
+`audit_audiences` reports each audience's size and Meta status: too small to deliver (delivery
+status 300), still populating (operation status 441, usable meanwhile), too small to seed a
+lookalike (under 100 people), and groups that share the same rule.
+
 ## A few Meta limits
 
 - Instant Form content cannot be edited after creation. Create a replacement form, or archive the old one.

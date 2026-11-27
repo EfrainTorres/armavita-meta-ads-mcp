@@ -102,6 +102,33 @@ pub struct FlexibleTargetingGroup {
 pub struct TargetingAutomation {
     /// Explicit Advantage+ audience intent. Sent to Meta as `1` or `0`.
     pub advantage_audience: bool,
+    /// Per-dimension automation switches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub individual_setting: Option<IndividualAutomationSetting>,
+}
+
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct IndividualAutomationSetting {
+    /// "Reach more people across other mobile devices" (v27). For Sales ad sets that
+    /// target `user_device` or `user_os`, Meta turns it on when omitted; send `false`
+    /// to keep delivery on the targeted devices/OS. Sent to Meta as `1` or `0`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "bool_as_flag"
+    )]
+    pub device: Option<bool>,
+}
+
+fn bool_as_flag<S: serde::Serializer>(
+    value: &Option<bool>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(enabled) => serializer.serialize_u8(u8::from(*enabled)),
+        None => serializer.serialize_none(),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
@@ -464,6 +491,36 @@ mod tests {
         assert_eq!(targeting["targeting_automation"]["advantage_audience"], 0);
         assert!(targeting.get("access_token").is_none());
         assert!(targeting.get("age_range").is_none());
+    }
+
+    #[test]
+    fn encodes_the_v27_device_automation_opt_out_as_a_flag() {
+        let input: EstimateAudienceSizeInput = serde_json::from_value(json!({
+            "ad_account_id": "123",
+            "targeting": {
+                "geo_locations": {"countries": ["US"]},
+                "targeting_automation": {
+                    "advantage_audience": false,
+                    "individual_setting": {"device": false}
+                }
+            }
+        }))
+        .expect("valid input");
+        let (_, query) = build_request(&input).expect("valid request");
+        let targeting: Value = serde_json::from_str(&query[0].1).expect("targeting JSON");
+        assert_eq!(
+            targeting["targeting_automation"],
+            json!({"advantage_audience": 0, "individual_setting": {"device": 0}})
+        );
+
+        let omitted = minimal_input();
+        let (_, query) = build_request(&omitted).expect("valid request");
+        let targeting: Value = serde_json::from_str(&query[0].1).expect("targeting JSON");
+        assert!(
+            targeting["targeting_automation"]
+                .get("individual_setting")
+                .is_none()
+        );
     }
 
     #[test]
