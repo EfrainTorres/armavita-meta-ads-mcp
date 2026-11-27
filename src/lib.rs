@@ -47,6 +47,7 @@ mod reports;
 mod safety;
 mod server;
 mod targeting_search;
+mod toolsets;
 
 pub use auth::{AuthError, LoginOutcome, login};
 pub use config::MetaConfig;

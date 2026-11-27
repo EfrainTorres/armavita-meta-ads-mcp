@@ -77,6 +77,27 @@ Run `codex mcp list` to check the configuration.
 Use the included [`.mcp.json`](../.mcp.json). Launch Claude with `MCP_TOOL_TIMEOUT=330000` to allow
 long-running calls. Pass credentials through the environment, not as values saved in JSON.
 
+## Choosing tool groups
+
+Every tool is exposed by default. To give an assistant a smaller catalog, set `META_ADS_TOOLSETS`
+to a comma-separated list of groups:
+
+| Group | Tools |
+| --- | --- |
+| `core` (always on) | Accounts, campaigns, ad sets, ads, creatives, media, Pages, targeting search, comments, extensions, labels, budget schedules, mutation plans |
+| `insights` | Insights, async report jobs, reports, custom derived metrics |
+| `audiences` | Custom, lookalike, engagement and website audiences |
+| `catalogs` | Catalogs, products, feeds, item batches, marketplace signals |
+| `measurement` | Conversions API, datasets, custom conversions |
+| `leads` | Instant Forms, leads, test leads, lead webhooks |
+| `business` | Business assets, partnership permissions, Threads and Page-backed Instagram accounts |
+| `automation` | Ad rules, studies, value rules |
+| `planning` | Reach and frequency predictions, Ad Library search |
+
+For example, `META_ADS_TOOLSETS=insights,audiences`. Unset, empty or `all` keeps every tool, and
+an unknown name stops the server at startup. Tools outside the selection are neither listed nor
+callable.
+
 ## Media uploads
 
 Set `META_MEDIA_ROOT` to an existing absolute directory you control. Pass tool paths relative to
