@@ -18,7 +18,7 @@ use tokio::{
 
 use crate::config::DEFAULT_GRAPH_API_VERSION;
 
-const OAUTH_SCOPE: &str = "ads_management,ads_read,business_management,pages_show_list,pages_read_engagement,instagram_basic,threads_business_basic";
+const OAUTH_SCOPE: &str = "ads_management,ads_read,business_management,pages_show_list,pages_read_engagement,pages_manage_ads,leads_retrieval,catalog_management,instagram_basic,threads_business_basic";
 const CALLBACK_PORT_START: u16 = 8_080;
 const CALLBACK_PORT_ATTEMPTS: u16 = 10;
 const CALLBACK_TIMEOUT: Duration = Duration::from_secs(300);

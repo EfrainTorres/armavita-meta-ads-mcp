@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::access_token_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1682,6 +1683,7 @@ mod tests {
                 "get_mutation_plan",
                 "get_threads_account",
                 "grant_branded_content_ad_permission",
+                "inspect_access_token",
                 "inspect_ad_object",
                 "list_ad_accounts",
                 "list_ad_creatives",
@@ -1911,7 +1913,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 126);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();

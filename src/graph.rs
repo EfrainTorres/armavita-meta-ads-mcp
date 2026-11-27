@@ -19,7 +19,9 @@ use tokio::{io::AsyncReadExt, time::Instant};
 use tokio_util::io::ReaderStream;
 
 use crate::{
-    config::{MAX_RESPONSE_BYTES, MAX_RETRIES, MetaConfig, REQUEST_TIMEOUT, TokenOrigin},
+    config::{
+        AppSecret, MAX_RESPONSE_BYTES, MAX_RETRIES, MetaConfig, REQUEST_TIMEOUT, TokenOrigin,
+    },
     error::{ApiErrorDetails, GraphError, MetaErrorDetails, RateLimitDetails, StartupError},
 };
 
@@ -65,6 +67,8 @@ pub(crate) struct GraphClient {
     api_base: String,
     // Page-scoped clones reuse the pool and keep credentials out of results/Debug.
     credential: Credential,
+    // Opt-in: sign every request with `appsecret_proof` (HMAC of its token).
+    appsecret: Option<AppSecret>,
 }
 
 /// Bearer credential used for a request.
@@ -78,6 +82,7 @@ enum Credential {
     User(Arc<UserCredential>),
     Page {
         authorization: HeaderValue,
+        appsecret_proof: Option<String>,
         revoked: Arc<AtomicBool>,
     },
 }
@@ -85,6 +90,7 @@ enum Credential {
 struct UserCredential {
     state: RwLock<UserCredentialState>,
     source: Arc<dyn CredentialSource>,
+    appsecret: Option<AppSecret>,
 }
 
 #[derive(Default)]
@@ -96,6 +102,7 @@ struct UserCredentialState {
 
 struct ActiveCredential {
     authorization: HeaderValue,
+    appsecret_proof: Option<String>,
     digest: TokenDigest,
     origin: Option<TokenOrigin>,
 }
@@ -104,7 +111,39 @@ struct ActiveCredential {
 /// token that was actually refused.
 struct UsedCredential {
     authorization: HeaderValue,
+    appsecret_proof: Option<String>,
     user_digest: Option<TokenDigest>,
+}
+
+/// HMAC-SHA256 (RFC 2104) over `message`, as lowercase hex. Implemented on the
+/// existing `sha2` dependency; checked against RFC 4231 in the tests.
+fn hmac_sha256_hex(key: &[u8], message: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut block = [0_u8; BLOCK];
+    if key.len() > BLOCK {
+        block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(block.map(|byte| byte ^ 0x36));
+    inner.update(message);
+    let mut outer = Sha256::new();
+    outer.update(block.map(|byte| byte ^ 0x5c));
+    outer.update(inner.finalize());
+    outer
+        .finalize()
+        .iter()
+        .fold(String::with_capacity(64), |mut hex, byte| {
+            use std::fmt::Write as _;
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// Meta's `appsecret_proof`: HMAC-SHA256 of the access token keyed by the app secret.
+fn appsecret_proof(secret: Option<&AppSecret>, token: &str) -> Option<String> {
+    secret.map(|secret| hmac_sha256_hex(secret.expose().as_bytes(), token.as_bytes()))
 }
 
 /// Where a rejected user token is looked up again.
@@ -196,17 +235,18 @@ impl UserCredential {
         }
         // Same precedence as start-up: the environment first, then the cache.
         // The cache is read only when the environment offers nothing new.
+        let appsecret = self.appsecret.as_ref();
         if let Some(used) = self
             .source
             .environment_token()
-            .and_then(|token| state.install(&token, TokenOrigin::Environment))
+            .and_then(|token| state.install(&token, TokenOrigin::Environment, appsecret))
         {
             return Ok(used);
         }
         if let Some(used) = self
             .source
             .cached_token()
-            .and_then(|token| state.install(&token, TokenOrigin::Cache))
+            .and_then(|token| state.install(&token, TokenOrigin::Cache, appsecret))
         {
             return Ok(used);
         }
@@ -240,7 +280,12 @@ impl UserCredential {
 }
 
 impl UserCredentialState {
-    fn install(&mut self, token: &str, origin: TokenOrigin) -> Option<UsedCredential> {
+    fn install(
+        &mut self,
+        token: &str,
+        origin: TokenOrigin,
+        appsecret: Option<&AppSecret>,
+    ) -> Option<UsedCredential> {
         let digest = token_digest(token);
         if self.rejected == Some(digest) {
             return None;
@@ -251,6 +296,7 @@ impl UserCredentialState {
         }
         let active = ActiveCredential {
             authorization,
+            appsecret_proof: appsecret_proof(appsecret, token),
             digest,
             origin: Some(origin),
         };
@@ -264,6 +310,7 @@ impl ActiveCredential {
     fn used(&self) -> UsedCredential {
         UsedCredential {
             authorization: self.authorization.clone(),
+            appsecret_proof: self.appsecret_proof.clone(),
             user_digest: Some(self.digest),
         }
     }
@@ -314,6 +361,7 @@ impl GraphClient {
                 bearer_header(token.expose()).ok_or(StartupError::InvalidAccessToken)?;
             state.active = Some(ActiveCredential {
                 authorization,
+                appsecret_proof: appsecret_proof(config.appsecret_proof.as_ref(), token.expose()),
                 digest: token_digest(token.expose()),
                 origin: config.token_origin,
             });
@@ -353,7 +401,9 @@ impl GraphClient {
             credential: Credential::User(Arc::new(UserCredential {
                 state: RwLock::new(state),
                 source,
+                appsecret: config.appsecret_proof.clone(),
             })),
+            appsecret: config.appsecret_proof.clone(),
         })
     }
 
@@ -362,6 +412,7 @@ impl GraphClient {
             Credential::User(user) => user.current(),
             Credential::Page {
                 authorization,
+                appsecret_proof,
                 revoked,
             } => {
                 if revoked.load(Ordering::Acquire) {
@@ -369,6 +420,7 @@ impl GraphClient {
                 } else {
                     Ok(UsedCredential {
                         authorization: authorization.clone(),
+                        appsecret_proof: appsecret_proof.clone(),
                         user_digest: None,
                     })
                 }
@@ -438,6 +490,7 @@ impl GraphClient {
         let mut scoped = self.clone();
         scoped.credential = Credential::Page {
             authorization,
+            appsecret_proof: appsecret_proof(self.appsecret.as_ref(), &token),
             revoked: Arc::new(AtomicBool::new(false)),
         };
         Ok(scoped)
@@ -449,9 +502,44 @@ impl GraphClient {
         url: impl AsRef<str>,
         credential: &UsedCredential,
     ) -> reqwest::RequestBuilder {
-        self.client
+        let request = self
+            .client
             .request(method, url.as_ref())
-            .header(AUTHORIZATION, credential.authorization.clone())
+            .header(AUTHORIZATION, credential.authorization.clone());
+        match &credential.appsecret_proof {
+            Some(proof) => request.query(&[("appsecret_proof", proof)]),
+            None => request,
+        }
+    }
+
+    /// Whether requests are signed with `appsecret_proof`.
+    pub(crate) fn signs_appsecret_proof(&self) -> bool {
+        self.appsecret.is_some()
+    }
+
+    /// `GET /debug_token` for the token this client currently uses. The token is
+    /// sent only to Meta and never appears in the result.
+    pub(crate) async fn debug_current_token(&self) -> Result<Value, GraphError> {
+        let credential = self.current_credential()?;
+        let token = credential
+            .authorization
+            .to_str()
+            .ok()
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .ok_or(GraphError::NotAuthenticated)?
+            .to_owned();
+        let url = format!("{}/debug_token", self.api_base);
+        let query = [("input_token".to_owned(), token)];
+        tokio::time::timeout(
+            TOTAL_GET_TIMEOUT,
+            self.get_json_with_retries(&url, &query, false, &credential),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(GraphError::Transport {
+                message: "Meta request timed out".to_owned(),
+            })
+        })
     }
 
     /// Submit one bounded, form-encoded Graph mutation.
@@ -1796,6 +1884,103 @@ mod tests {
         let result = graph.get_json("me", &[]).await.unwrap();
         assert!(!result.to_string().contains("private-user-token"));
         assert_eq!(result["id"], "7");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn hmac_sha256_matches_rfc_4231() {
+        // Test case 1.
+        assert_eq!(
+            super::hmac_sha256_hex(&[0x0b; 20], b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        // Test case 2.
+        assert_eq!(
+            super::hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // Test case 6: a key longer than the block size.
+        assert_eq!(
+            super::hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[tokio::test]
+    async fn signs_user_and_page_requests_with_appsecret_proof_only_when_enabled() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let user_proof = super::hmac_sha256_hex(secret.as_bytes(), b"user-token-1234567890");
+        let page_proof = super::hmac_sha256_hex(secret.as_bytes(), b"private-page-token");
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected = [
+            format!("GET /me?appsecret_proof={user_proof} HTTP/1.1"),
+            format!("GET /42?appsecret_proof={user_proof}&fields=access_token HTTP/1.1"),
+            format!("POST /42/feed?appsecret_proof={page_proof} HTTP/1.1"),
+            "GET /me HTTP/1.1".to_owned(),
+        ];
+        let server = tokio::spawn(async move {
+            for (line, body) in expected.iter().zip([
+                r#"{"id":"7"}"#,
+                r#"{"access_token":"private-page-token"}"#,
+                r#"{"id":"9"}"#,
+                r#"{"id":"7"}"#,
+            ]) {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = String::from_utf8(read_http_request(&mut socket).await).unwrap();
+                assert!(request.starts_with(line), "{request}");
+                respond(&mut socket, "200 OK", "", body).await;
+            }
+        });
+        let signed = GraphClient::new(
+            &MetaConfig::for_test(format!("http://{address}"), Some("user-token-1234567890"))
+                .with_appsecret_proof(secret),
+        )
+        .unwrap();
+        assert!(signed.signs_appsecret_proof());
+        signed.get_json("me", &[]).await.unwrap();
+        let page = signed.for_page("42").await.unwrap();
+        page.post_form_json("42/feed", &[]).await.unwrap();
+
+        let plain = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("user-token-1234567890"),
+        ))
+        .unwrap();
+        assert!(!plain.signs_appsecret_proof());
+        plain.get_json("me", &[]).await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn debug_token_sends_the_token_only_to_meta() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = String::from_utf8(read_http_request(&mut socket).await).unwrap();
+            assert!(
+                request.starts_with("GET /debug_token?input_token=user-token-1234567890 HTTP/1.1")
+            );
+            respond(
+                &mut socket,
+                "200 OK",
+                "",
+                r#"{"data":{"app_id":"1","type":"SYSTEM_USER","is_valid":true,"scopes":["ads_read"]}}"#,
+            )
+            .await;
+        });
+        let graph = GraphClient::new(&MetaConfig::for_test(
+            format!("http://{address}"),
+            Some("user-token-1234567890"),
+        ))
+        .unwrap();
+        let payload = graph.debug_current_token().await.unwrap();
+        assert_eq!(payload["data"]["type"], "SYSTEM_USER");
+        assert!(!payload.to_string().contains("user-token"));
         server.await.unwrap();
     }
 
