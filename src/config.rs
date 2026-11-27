@@ -31,6 +31,8 @@ pub struct MetaConfig {
     pub(crate) access_token: Option<AccessToken>,
     pub(crate) token_origin: Option<TokenOrigin>,
     pub(crate) media_root: Option<PathBuf>,
+    /// Tool groups to expose; `None` exposes every tool.
+    pub(crate) toolsets: Option<std::collections::BTreeSet<crate::toolsets::Toolset>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -59,12 +61,17 @@ impl MetaConfig {
             },
         };
         let media_root = normalize_media_root(env::var_os(MEDIA_ROOT_ENV))?;
+        let toolsets = crate::toolsets::parse_toolsets(
+            env::var(crate::toolsets::TOOLSETS_ENV).ok().as_deref(),
+        )
+        .map_err(ConfigError::Toolsets)?;
 
         Ok(Self {
             api_base: format!("https://graph.facebook.com/{DEFAULT_GRAPH_API_VERSION}"),
             access_token,
             token_origin,
             media_root,
+            toolsets,
         })
     }
 
@@ -75,7 +82,14 @@ impl MetaConfig {
             access_token: access_token.map(|value| AccessToken(value.to_owned())),
             token_origin: access_token.map(|_| TokenOrigin::Environment),
             media_root: None,
+            toolsets: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_toolsets(mut self, raw: &str) -> Self {
+        self.toolsets = crate::toolsets::parse_toolsets(Some(raw)).unwrap();
+        self
     }
 }
 
@@ -100,6 +114,8 @@ pub enum ConfigError {
     AccessToken,
     #[error("META_MEDIA_ROOT must name an existing absolute directory")]
     MediaRoot,
+    #[error("META_ADS_TOOLSETS names an unknown toolset `{0}`; use all, or a list of: {names}", names = crate::toolsets::toolset_names())]
+    Toolsets(String),
 }
 
 #[cfg(test)]

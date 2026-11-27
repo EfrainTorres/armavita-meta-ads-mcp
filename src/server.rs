@@ -133,20 +133,30 @@ pub struct MetaAdsServer {
 impl MetaAdsServer {
     pub fn new(config: MetaConfig) -> Result<Self, StartupError> {
         let graph = GraphClient::new(&config)?;
+        let mut tool_router = Self::tool_router()
+            + Self::automation_router()
+            + Self::ad_engagement_router()
+            + Self::creative_previews_router()
+            + Self::ad_inspection_router()
+            + Self::ad_library_mutations_router()
+            + Self::experiences_router()
+            + Self::extensions_router()
+            + Self::budget_schedules_router()
+            + Self::asset_admin_router()
+            + Self::page_media_router()
+            + Self::catalog_admin_router()
+            + Self::lead_forms_router();
+        if let Some(enabled) = &config.toolsets {
+            for tool in tool_router.list_all() {
+                if crate::toolsets::toolset_of(&tool.name)
+                    .is_some_and(|set| !enabled.contains(&set))
+                {
+                    tool_router.remove_route(&tool.name);
+                }
+            }
+        }
         Ok(Self {
-            tool_router: Self::tool_router()
-                + Self::automation_router()
-                + Self::ad_engagement_router()
-                + Self::creative_previews_router()
-                + Self::ad_inspection_router()
-                + Self::ad_library_mutations_router()
-                + Self::experiences_router()
-                + Self::extensions_router()
-                + Self::budget_schedules_router()
-                + Self::asset_admin_router()
-                + Self::page_media_router()
-                + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+            tool_router,
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -2004,6 +2014,44 @@ mod tests {
         assert_eq!(annotations.read_only_hint, Some(false));
         assert_eq!(annotations.destructive_hint, Some(false));
         assert_eq!(annotations.idempotent_hint, Some(false));
+    }
+
+    #[test]
+    fn every_tool_belongs_to_a_toolset() {
+        for tool in server().tool_definitions() {
+            assert!(
+                crate::toolsets::toolset_of(&tool.name).is_some(),
+                "{} has no toolset in src/toolsets.rs",
+                tool.name
+            );
+        }
+    }
+
+    #[test]
+    fn toolsets_hide_and_unroute_other_groups() {
+        let all = server().tool_definitions().len();
+        let filtered = MetaAdsServer::new(
+            MetaConfig::for_test("https://graph.facebook.com/v27.0", None)
+                .with_toolsets("insights"),
+        )
+        .unwrap();
+        let names = filtered
+            .tool_definitions()
+            .into_iter()
+            .map(|tool| tool.name.to_string())
+            .collect::<Vec<_>>();
+        assert!(names.len() < all);
+        assert!(names.iter().any(|name| name == "list_campaigns"));
+        assert!(names.iter().any(|name| name == "list_insights"));
+        assert!(!names.iter().any(|name| name == "send_capi_events"));
+        assert!(!filtered.tool_router.has_route("send_capi_events"));
+        for name in &names {
+            let set = crate::toolsets::toolset_of(name).unwrap();
+            assert!(matches!(
+                set,
+                crate::toolsets::Toolset::Core | crate::toolsets::Toolset::Insights
+            ));
+        }
     }
 
     #[test]
