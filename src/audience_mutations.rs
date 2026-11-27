@@ -46,6 +46,41 @@ pub struct CreateCustomAudienceInput {
     pub customer_file_source: CustomerFileSource,
     /// Optional audience description, up to 1,000 characters.
     pub description: Option<String>,
+    /// Optional audience labels that tell Meta what the people are, e.g.
+    /// `["HIGH_VALUE_CUSTOMERS"]`. Up to 10.
+    #[schemars(length(min = 1, max = 10))]
+    pub audience_labels: Option<Vec<AudienceLabel>>,
+}
+
+/// Audience labels Meta accepts on customer-file, website and app audiences.
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AudienceLabel {
+    QualifiedLeads,
+    DisqualifiedLeads,
+    AppUsers,
+    TrialUsers,
+    EngagedUsers,
+    HighValueCustomers,
+    LowValueCustomers,
+    AtRisk,
+    Disengaged,
+    GeneralCustomers,
+}
+
+fn encode_audience_labels(labels: &[AudienceLabel]) -> Result<String, PublicError> {
+    if labels.is_empty() || labels.len() > 10 {
+        return Err(PublicError::invalid_input(
+            "audience_labels must hold 1 through 10 labels",
+            "Remove extra labels",
+        ));
+    }
+    serde_json::to_string(labels).map_err(|_| {
+        PublicError::invalid_input(
+            "audience_labels could not be encoded",
+            "Use the documented labels",
+        )
+    })
 }
 
 /// Update mutable customer-list metadata. Non-destructive and idempotent for an
@@ -62,6 +97,10 @@ pub struct UpdateCustomAudienceInput {
     pub name: Option<String>,
     /// New description, up to 1,000 characters. Use an empty string to clear it.
     pub description: Option<String>,
+    /// Replace the audience labels that tell Meta what the people are, e.g.
+    /// `["HIGH_VALUE_CUSTOMERS"]`. Up to 10.
+    #[schemars(length(min = 1, max = 10))]
+    pub audience_labels: Option<Vec<AudienceLabel>>,
 }
 
 /// Permanently delete an audience. Destructive but idempotent in final-state
@@ -129,8 +168,10 @@ pub struct ManageCustomAudienceUsersInput {
     pub replace_session: Option<ReplaceAudienceSession>,
 }
 
-/// Create a country-based lookalike. Non-destructive and non-idempotent: a
-/// repeated ambiguous request can create a duplicate audience.
+/// Create a lookalike. Since Graph v27 a lookalike has no country of its own: it
+/// delivers to the locations of the ad sets that use it, so those ad sets must
+/// target a location. Non-destructive and non-idempotent: a repeated ambiguous
+/// request can create a duplicate audience.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateLookalikeAudienceInput {
@@ -140,7 +181,7 @@ pub struct CreateLookalikeAudienceInput {
     pub name: String,
     /// Numeric seed custom-audience ID.
     pub origin_audience_id: String,
-    /// Typed country-based lookalike definition.
+    /// Typed lookalike size. Location comes from the ad sets that use it.
     pub lookalike_spec: LookalikeSpecInput,
     /// Optional description, up to 1,000 characters.
     pub description: Option<String>,
@@ -275,15 +316,13 @@ impl LookalikeAudienceType {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct LookalikeSpecInput {
-    /// Two-letter country code.
-    pub country: String,
     /// Meta preset. Provide exactly one of `audience_type` or `ratio`.
     pub audience_type: Option<LookalikeAudienceType>,
     /// Custom top percentage as a fraction, 0.01 through 0.20 in 0.01 steps.
     pub ratio: Option<f64>,
     /// Optional range start in 0.01 steps; requires `ratio` and must be smaller.
     pub starting_ratio: Option<f64>,
-    /// Permit Meta to find seed members outside the requested country.
+    /// Permit Meta to use seed members from every country.
     pub allow_international_seeds: Option<bool>,
 }
 
@@ -522,6 +561,12 @@ fn build_create_request(input: &CreateCustomAudienceInput) -> Result<MutationReq
     )? {
         form.push(("description".to_owned(), description));
     }
+    if let Some(labels) = &input.audience_labels {
+        form.push((
+            "audience_labels".to_owned(),
+            encode_audience_labels(labels)?,
+        ));
+    }
     Ok(MutationRequest {
         method: MutationMethod::Post,
         endpoint: format!("{account_id}/customaudiences"),
@@ -545,10 +590,16 @@ fn build_update_request(input: &UpdateCustomAudienceInput) -> Result<MutationReq
             bounded_text_allow_empty(description, MAX_DESCRIPTION_CHARS, "description")?,
         ));
     }
+    if let Some(labels) = &input.audience_labels {
+        form.push((
+            "audience_labels".to_owned(),
+            encode_audience_labels(labels)?,
+        ));
+    }
     if form.is_empty() {
         return Err(PublicError::invalid_input(
             "at least one audience update is required",
-            "Provide name and/or description",
+            "Provide name, description and/or audience_labels",
         ));
     }
     Ok(MutationRequest {
@@ -962,9 +1013,7 @@ fn normalize_fixed_digits(
 }
 
 fn encode_lookalike_spec(input: &LookalikeSpecInput) -> Result<String, PublicError> {
-    let country = normalize_country(&input.country)?;
     let mut spec = Map::new();
-    spec.insert("country".to_owned(), Value::String(country));
     match (input.audience_type, input.ratio) {
         (Some(audience_type), None) => {
             if input.starting_ratio.is_some() {
@@ -1186,17 +1235,6 @@ fn bounded_text_allow_empty(
     Ok(value.to_owned())
 }
 
-fn normalize_country(raw: &str) -> Result<String, PublicError> {
-    let country = raw.trim().to_ascii_uppercase();
-    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        return Err(PublicError::invalid_input(
-            "country must be a two-letter country code",
-            "Use an ISO 3166-1 alpha-2 code such as US",
-        ));
-    }
-    Ok(country)
-}
-
 fn is_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -1365,6 +1403,7 @@ mod tests {
                             custom_audience_id: "42".to_owned(),
                             name: Some("Renamed".to_owned()),
                             description: None,
+                            audience_labels: None,
                         },
                     )
                     .await,
@@ -1462,6 +1501,7 @@ mod tests {
                             custom_audience_id: "42".to_owned(),
                             name: Some("Renamed".to_owned()),
                             description: None,
+                            audience_labels: None,
                         },
                     )
                     .await,
@@ -1531,6 +1571,7 @@ mod tests {
             name: " Seed ".to_owned(),
             customer_file_source: CustomerFileSource::UserProvidedOnly,
             description: Some(" Current customers ".to_owned()),
+            audience_labels: None,
         })
         .unwrap();
         assert!(create.method == MutationMethod::Post);
@@ -1553,6 +1594,7 @@ mod tests {
             custom_audience_id: " 456 ".to_owned(),
             name: Some(" Renamed ".to_owned()),
             description: Some(" ".to_owned()),
+            audience_labels: None,
         })
         .unwrap();
         assert_eq!(update.endpoint, "456");
@@ -1825,13 +1867,12 @@ mod tests {
     }
 
     #[test]
-    fn builds_a_typed_country_lookalike_spec() {
+    fn builds_a_v27_lookalike_spec_without_location() {
         let request = build_lookalike_request(&CreateLookalikeAudienceInput {
             ad_account_id: "123".to_owned(),
             name: " Similar ".to_owned(),
             origin_audience_id: "456".to_owned(),
             lookalike_spec: LookalikeSpecInput {
-                country: "us".to_owned(),
                 audience_type: None,
                 ratio: Some(0.02),
                 starting_ratio: Some(0.01),
@@ -1850,12 +1891,21 @@ mod tests {
         assert_eq!(
             spec,
             json!({
-                "country": "US",
                 "starting_ratio": 0.01,
                 "ratio": 0.02,
                 "allow_international_seeds": false
             })
         );
+    }
+
+    #[test]
+    fn v27_rejects_lookalike_country_and_location_spec() {
+        for spec in [
+            json!({"country": "US", "ratio": 0.01}),
+            json!({"location_spec": {"geo_locations": {"countries": ["US"]}}, "ratio": 0.01}),
+        ] {
+            assert!(serde_json::from_value::<LookalikeSpecInput>(spec).is_err());
+        }
     }
 
     #[test]
@@ -1865,6 +1915,7 @@ mod tests {
             name: "Bad\0Name".to_owned(),
             customer_file_source: CustomerFileSource::UserProvidedOnly,
             description: None,
+            audience_labels: None,
         });
         assert!(control_name.is_err());
 
@@ -1873,6 +1924,7 @@ mod tests {
             custom_audience_id: "42".to_owned(),
             name: None,
             description: Some("Bad\0description".to_owned()),
+            audience_labels: None,
         });
         assert!(control_description.is_err());
 
@@ -1881,6 +1933,7 @@ mod tests {
             custom_audience_id: "42".to_owned(),
             name: None,
             description: None,
+            audience_labels: None,
         });
         assert!(no_update.is_err());
 
@@ -1949,7 +2002,6 @@ mod tests {
             name: "Similar".to_owned(),
             origin_audience_id: "456".to_owned(),
             lookalike_spec: LookalikeSpecInput {
-                country: "USA".to_owned(),
                 audience_type: None,
                 ratio: Some(0.015),
                 starting_ratio: None,
@@ -2000,5 +2052,37 @@ mod tests {
         assert!(!format!("{uncertain:?}").contains("raw-sensitive-marker"));
         assert!(!uncertain.retryable);
         assert_eq!(uncertain.action.as_deref(), Some("Verify state"));
+    }
+
+    #[test]
+    fn sends_audience_labels_on_create_and_update() {
+        let create: CreateCustomAudienceInput = serde_json::from_value(serde_json::json!({
+            "ad_account_id": "123",
+            "name": "Buyers",
+            "customer_file_source": "USER_PROVIDED_ONLY",
+            "audience_labels": ["HIGH_VALUE_CUSTOMERS", "AT_RISK"]
+        }))
+        .unwrap();
+        let request = build_create_request(&create).unwrap();
+        assert!(request.form.contains(&(
+            "audience_labels".to_owned(),
+            "[\"HIGH_VALUE_CUSTOMERS\",\"AT_RISK\"]".to_owned()
+        )));
+        let update: UpdateCustomAudienceInput = serde_json::from_value(serde_json::json!({
+            "ad_account_id": "123",
+            "custom_audience_id": "42",
+            "audience_labels": ["QUALIFIED_LEADS"]
+        }))
+        .unwrap();
+        assert!(build_update_request(&update).is_ok());
+        assert!(
+            serde_json::from_value::<CreateCustomAudienceInput>(serde_json::json!({
+                "ad_account_id": "123",
+                "name": "Buyers",
+                "customer_file_source": "USER_PROVIDED_ONLY",
+                "audience_labels": ["VIP"]
+            }))
+            .is_err()
+        );
     }
 }

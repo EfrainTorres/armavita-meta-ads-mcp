@@ -9,7 +9,7 @@ including for tools whose names stayed the same.
 
 - Install the Rust executable and keep the server name `meta-ads-armavita` in your client config.
 - Remove `meta_access_token` from tool calls. Use `META_ACCESS_TOKEN` or browser login.
-- The API version is fixed at v26.0; `META_GRAPH_API_VERSION` no longer changes it.
+- The API version is fixed at v27.0 (2.0.0-rc.2 and earlier used v26.0); `META_GRAPH_API_VERSION` no longer changes it.
 - Use `--app-id` only with `--login`. On Windows, use an environment token.
 - Put local uploads under `META_MEDIA_ROOT` and use paths relative to that folder.
 

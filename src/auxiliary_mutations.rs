@@ -100,6 +100,25 @@ pub struct CreateReachFrequencyPredictionInput {
     /// Optional positive lifetime frequency cap.
     #[schemars(range(min = 1))]
     pub frequency_cap: Option<u16>,
+    /// Optional burst product (v27). Replaces the removed `meta_moment_maker_spec`;
+    /// Meta derives saturation server-side.
+    pub product_type: Option<ReservationProductType>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum ReservationProductType {
+    AdsBurst,
+    AdsSuperBurst,
+}
+
+impl ReservationProductType {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::AdsBurst => "ADS_BURST",
+            Self::AdsSuperBurst => "ADS_SUPER_BURST",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
@@ -413,6 +432,9 @@ fn build_prediction_request(
     if let Some(frequency_cap) = input.frequency_cap {
         form.push(("frequency_cap".to_owned(), frequency_cap.to_string()));
     }
+    if let Some(product_type) = input.product_type {
+        form.push(("product_type".to_owned(), product_type.as_str().to_owned()));
+    }
 
     Ok(MutationRequest {
         endpoint: format!("{account_id}/reachfrequencypredictions"),
@@ -623,9 +645,10 @@ mod tests {
 
     use super::{
         CreateReachFrequencyPredictionInput, CreateThreadsAccountInput, ReservationGender,
-        ReservationObjective, RevokeBrandedContentAdPermissionInput, ThreadsAccountMode,
-        build_permission_request, build_prediction_request, build_threads_request,
-        confirmed_permission_revocation, created_numeric_id, revoke_branded_content_ad_permission,
+        ReservationObjective, ReservationProductType, RevokeBrandedContentAdPermissionInput,
+        ThreadsAccountMode, build_permission_request, build_prediction_request,
+        build_threads_request, confirmed_permission_revocation, created_numeric_id,
+        revoke_branded_content_ad_permission,
     };
 
     const NOW: u64 = 2_000_000_000;
@@ -692,7 +715,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_validates_acknowledgement_before_auth_or_network() {
-        let graph = GraphClient::new(&MetaConfig::for_test("http://127.0.0.1:9/v26.0", None))
+        let graph = GraphClient::new(&MetaConfig::for_test("http://127.0.0.1:9/v27.0", None))
             .expect("test client");
         let input = |acknowledgement: &str| RevokeBrandedContentAdPermissionInput {
             instagram_business_account_id: "123".to_owned(),
@@ -732,6 +755,7 @@ mod tests {
                 gender: Some(ReservationGender::Female),
                 objective: Some(ReservationObjective::VideoViews),
                 frequency_cap: Some(3),
+                product_type: Some(ReservationProductType::AdsSuperBurst),
             },
             NOW,
         )
@@ -752,6 +776,7 @@ mod tests {
                     "{\"geo_locations\":{\"countries\":[\"US\"]},\"age_min\":18,\"age_max\":65,\"genders\":[2]}".to_owned()
                 ),
                 ("frequency_cap".to_owned(), "3".to_owned()),
+                ("product_type".to_owned(), "ADS_SUPER_BURST".to_owned()),
             ]
         );
     }
@@ -771,6 +796,7 @@ mod tests {
             gender: None,
             objective: None,
             frequency_cap: None,
+            product_type: None,
         };
         let request = build_prediction_request(&valid, NOW).unwrap();
         assert_eq!(request.form[1].1, "[\"456\"]");

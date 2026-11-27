@@ -908,6 +908,12 @@ fn append_string_list(
                 "Use plain Meta Insights breakdown names",
             ));
         }
+        if name == "breakdowns" && value == "dma" {
+            return Err(PublicError::invalid_input(
+                "Meta no longer supports the dma breakdown",
+                "Use breakdowns=[\"comscore_market\"] instead",
+            ));
+        }
         if seen.insert(value.to_owned()) {
             normalized.push(value);
         }
@@ -1603,5 +1609,21 @@ mod tests {
             request.query[1],
             ("after".to_owned(), "opaque-next".to_owned())
         );
+    }
+
+    #[test]
+    fn rejects_the_retired_dma_breakdown_with_a_replacement_hint() {
+        let input = ListInsightsInput {
+            breakdowns: Some(vec!["dma".to_owned()]),
+            ..base_input()
+        };
+        let error = build_list_request(&input).expect_err("dma is retired");
+        assert!(format!("{error:?}").contains("comscore_market"));
+
+        let input = ListInsightsInput {
+            breakdowns: Some(vec!["comscore_market".to_owned()]),
+            ..base_input()
+        };
+        assert!(build_list_request(&input).is_ok());
     }
 }

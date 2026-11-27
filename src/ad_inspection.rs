@@ -311,7 +311,7 @@ fn targeting_request(input: &QueryTargetingInput) -> Result<(String, Params), Pu
 impl MetaAdsServer {
     #[tool(
         name = "inspect_ad_object",
-        description = "Read selected v26 fields from an ad object. Use for full creative/targeting specs, review feedback, delivery issues, attribution settings, media status or audience rules; request only what is needed.",
+        description = "Read selected v27 fields from an ad object. Use for full creative/targeting specs, review feedback, delivery issues, attribution settings, media status or audience rules; request only what is needed.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn inspect_ad_object(
@@ -359,7 +359,7 @@ impl MetaAdsServer {
 
     #[tool(
         name = "query_targeting",
-        description = "Browse, search, suggest, validate or describe account targeting; estimate delivery and read minimum budgets. Accepts bounded documented v26 parameters for the selected operation.",
+        description = "Browse, search, suggest, validate or describe account targeting; estimate delivery and read minimum budgets. Accepts bounded documented v27 parameters for the selected operation.",
         annotations(read_only_hint = true, open_world_hint = true)
     )]
     async fn query_targeting(

@@ -83,6 +83,12 @@ pub struct CreateAdSetInput {
     /// DSA payor text required by Meta for applicable regulated delivery.
     #[schemars(length(min = 1, max = 512))]
     pub dsa_payor: Option<String>,
+    /// Value rule set to apply (from `manage_value_rules`). Applying it sends
+    /// `value_rules_applied=true`; works with lowest-cost and cost-cap bidding.
+    #[schemars(length(min = 1, max = 64), regex(pattern = "^[0-9]{1,64}$"))]
+    pub value_rule_set_id: Option<String>,
+    /// Pass `false` alone to detach the ad set's value rules.
+    pub value_rules_applied: Option<bool>,
 }
 
 /// Update one ad set. An unchanged repeated request is idempotent, but `ACTIVE`
@@ -121,6 +127,12 @@ pub struct UpdateAdSetInput {
     pub dsa_beneficiary: Option<String>,
     #[schemars(length(min = 1, max = 512))]
     pub dsa_payor: Option<String>,
+    /// Value rule set to apply (from `manage_value_rules`). Applying it sends
+    /// `value_rules_applied=true`; works with lowest-cost and cost-cap bidding.
+    #[schemars(length(min = 1, max = 64), regex(pattern = "^[0-9]{1,64}$"))]
+    pub value_rule_set_id: Option<String>,
+    /// Pass `false` alone to detach the ad set's value rules.
+    pub value_rules_applied: Option<bool>,
 }
 
 /// Copy an ad set through Meta's `/copies` edge. The copy defaults to `PAUSED`;
@@ -197,6 +209,8 @@ pub enum AdSetOptimizationGoal {
     Thruplay,
     Value,
     VisitInstagramProfile,
+    ProfileVisit,
+    ProfileAndPageEngagement,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema)]
@@ -219,6 +233,7 @@ pub enum AdSetDestinationType {
     FacebookPage,
     InstagramDirect,
     InstagramProfile,
+    InstagramProfileAndFacebookPage,
     Messenger,
     OnAd,
     OnPage,
@@ -572,6 +587,11 @@ fn build_create_request(input: &CreateAdSetInput) -> Result<MutationRequest, Pub
         input.dsa_payor.as_deref(),
         Some(input.optimization_goal),
     )?;
+    append_value_rules(
+        &mut form,
+        input.value_rule_set_id.as_deref(),
+        input.value_rules_applied,
+    )?;
     validate_promoted_object_goal(input.optimization_goal, input.promoted_object.as_ref())?;
     if let Some(enabled) = input.is_dynamic_creative {
         form.push(("is_dynamic_creative".to_owned(), enabled.to_string()));
@@ -624,6 +644,11 @@ fn build_update_request(input: &UpdateAdSetInput) -> Result<MutationRequest, Pub
         input.dsa_payor.as_deref(),
         input.optimization_goal,
     )?;
+    append_value_rules(
+        &mut form,
+        input.value_rule_set_id.as_deref(),
+        input.value_rules_applied,
+    )?;
     if form.is_empty() {
         return Err(PublicError::invalid_input(
             "at least one ad-set field must be provided",
@@ -663,6 +688,37 @@ fn build_clone_request(input: &CloneAdSetInput) -> Result<MutationRequest, Publi
         endpoint: format!("{ad_set_id}/copies"),
         form,
     })
+}
+
+fn append_value_rules(
+    form: &mut Vec<(String, String)>,
+    value_rule_set_id: Option<&str>,
+    value_rules_applied: Option<bool>,
+) -> Result<(), PublicError> {
+    match (value_rule_set_id, value_rules_applied) {
+        (None, None) => {}
+        (Some(_), Some(false)) => {
+            return Err(PublicError::invalid_input(
+                "value_rules_applied=false detaches value rules and takes no value_rule_set_id",
+                "Omit value_rule_set_id to detach, or omit value_rules_applied to apply the set",
+            ));
+        }
+        (Some(set_id), _) => {
+            let set_id = required_numeric_id(set_id, "value_rule_set_id", "manage_value_rules")?;
+            form.push(("value_rule_set_id".to_owned(), set_id));
+            form.push(("value_rules_applied".to_owned(), "true".to_owned()));
+        }
+        (None, Some(true)) => {
+            return Err(PublicError::invalid_input(
+                "value_rules_applied=true needs value_rule_set_id",
+                "Pass the value rule set ID to apply",
+            ));
+        }
+        (None, Some(false)) => {
+            form.push(("value_rules_applied".to_owned(), "false".to_owned()));
+        }
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1368,6 +1424,8 @@ mod tests {
             frequency_control_specs: None,
             dsa_beneficiary: Some("ArmaVita LLC".to_owned()),
             dsa_payor: Some("ArmaVita LLC".to_owned()),
+            value_rule_set_id: None,
+            value_rules_applied: None,
         })
         .expect("valid request");
 
@@ -1425,6 +1483,8 @@ mod tests {
             frequency_control_specs: None,
             dsa_beneficiary: None,
             dsa_payor: None,
+            value_rule_set_id: None,
+            value_rules_applied: None,
         })
         .expect("valid request");
 
@@ -1585,5 +1645,58 @@ mod tests {
         let status = AdSetCreateStatus::Active;
         let value = serde_json::to_value(status).expect("serialize status");
         assert_eq!(value, Value::String("ACTIVE".to_owned()));
+    }
+
+    #[test]
+    fn value_rules_attach_detach_and_reject_contradictions() {
+        let update = |extra: Value| -> Result<super::MutationRequest, crate::error::PublicError> {
+            let mut value = json!({"ad_account_id": "123", "ad_set_id": "789"});
+            for (key, field) in extra.as_object().unwrap() {
+                value[key] = field.clone();
+            }
+            build_update_request(&serde_json::from_value::<UpdateAdSetInput>(value).unwrap())
+        };
+        let attach = update(json!({"value_rule_set_id": "55"})).unwrap();
+        assert!(
+            attach
+                .form
+                .contains(&("value_rule_set_id".to_owned(), "55".to_owned()))
+        );
+        assert!(
+            attach
+                .form
+                .contains(&("value_rules_applied".to_owned(), "true".to_owned()))
+        );
+        let detach = update(json!({"value_rules_applied": false})).unwrap();
+        assert_eq!(
+            detach.form,
+            [("value_rules_applied".to_owned(), "false".to_owned())]
+        );
+        assert!(update(json!({"value_rule_set_id": "55", "value_rules_applied": false})).is_err());
+        assert!(update(json!({"value_rules_applied": true})).is_err());
+        assert!(update(json!({"value_rule_set_id": "abc"})).is_err());
+    }
+
+    #[test]
+    fn accepts_the_2026_profile_visit_goals_and_destination() {
+        let update: UpdateAdSetInput = serde_json::from_value(json!({
+            "ad_account_id": "123",
+            "ad_set_id": "789",
+            "optimization_goal": "PROFILE_AND_PAGE_ENGAGEMENT",
+            "destination_type": "INSTAGRAM_PROFILE_AND_FACEBOOK_PAGE"
+        }))
+        .unwrap();
+        let request = build_update_request(&update).unwrap();
+        assert!(request.form.contains(&(
+            "optimization_goal".to_owned(),
+            "PROFILE_AND_PAGE_ENGAGEMENT".to_owned()
+        )));
+        assert!(request.form.contains(&(
+            "destination_type".to_owned(),
+            "INSTAGRAM_PROFILE_AND_FACEBOOK_PAGE".to_owned()
+        )));
+        assert!(
+            serde_json::from_value::<super::AdSetOptimizationGoal>(json!("PROFILE_VISIT")).is_ok()
+        );
     }
 }
