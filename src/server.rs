@@ -143,7 +143,8 @@ impl MetaAdsServer {
                 + Self::asset_admin_router()
                 + Self::page_media_router()
                 + Self::catalog_admin_router()
-                + Self::lead_forms_router(),
+                + Self::lead_forms_router()
+                + Self::insights_export_router(),
             graph,
             media_root: config.media_root,
             plans: MutationPlanStore::new(),
@@ -1677,6 +1678,7 @@ mod tests {
                 "delete_test_lead",
                 "discard_mutation_plan",
                 "estimate_audience_size",
+                "export_insights_job",
                 "generate_creative_previews",
                 "get_account_controls",
                 "get_mutation_plan",
@@ -1862,6 +1864,7 @@ mod tests {
                 | "update_campaign"
                 | "update_custom_audience"
                 | "update_custom_conversion"
+                | "export_insights_job"
                 | "upsert_product" => {
                     assert_eq!(annotations.read_only_hint, Some(false));
                     assert_eq!(annotations.destructive_hint, Some(false));
@@ -1887,7 +1890,7 @@ mod tests {
         ))
         .unwrap()
         .tool_definitions();
-        assert_eq!(tools.len(), 125);
+        assert_eq!(tools.len(), 126);
 
         for tool in &tools {
             let schema = serde_json::to_value(&tool.input_schema).unwrap();
